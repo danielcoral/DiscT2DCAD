@@ -1,0 +1,11 @@
+executable              = /ludc/Home/daniel_c/projects/DVA/DiscordantT2Dcomp/scripts/08c_GWASAnnot.sh
+log                     = /ludc/Home/daniel_c/logfiles/08c_GWASAnnot.log
+output                  = /ludc/Home/daniel_c/logfiles/08c_GWASAnnot.out
+error                   = /ludc/Home/daniel_c/logfiles/08c_GWASAnnot.err
+should_transfer_files   = Yes
+when_to_transfer_output = on_exit_or_evict
+request_memory = 128 GB
+request_cpus = 4
+#request_gpus = 1
+#+REQUESTED_WALLTIME = 60
+queue 1
