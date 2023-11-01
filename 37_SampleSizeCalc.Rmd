@@ -1,0 +1,134 @@
+---
+title: An R Markdown document converted from "37_SampleSizeCalc.ipynb"
+output: html_document
+---
+
+# Power calculations
+
+## Power calculation to detect variants in univariate GWAS
+
+```{r}
+daf <- .1
+```
+
+```{r}
+GRR <- 1.05
+```
+
+```{r}
+Prev <- 0.05
+```
+
+```{r}
+N <- 1e6
+```
+
+```{r}
+(cases <- N * Prev)
+```
+
+```{r}
+(controls <- N - cases)
+```
+
+```{r}
+(alpha <- sqrt(5e-8))
+```
+
+```{r}
+AAfreq <- daf^2
+```
+
+```{r}
+ABfreq <- 2 * daf * (1 - daf)
+```
+
+```{r}
+BBfreq <- (1 - daf)^2
+```
+
+```{r}
+x <- c((2 * GRR) - 1, GRR, 1)
+```
+
+```{r}
+AAprob <- x[1]*Prev / ( (x[1] * AAfreq) + (x[2] * ABfreq) + (x[3] * BBfreq) )
+```
+
+```{r}
+ABprob <- x[2]*Prev / ( (x[1] * AAfreq) + (x[2] * ABfreq) + (x[3] * BBfreq) )
+```
+
+```{r}
+BBprob <- x[3]*Prev / ( (x[1] * AAfreq) + (x[2] * ABfreq) + (x[3] * BBfreq) )
+```
+
+```{r}
+casesdaf <- ((AAprob * AAfreq) + (ABprob * ABfreq * .5)) / Prev
+```
+
+```{r}
+controlsdaf <- (((1 - AAprob) * AAfreq) + ((1 - ABprob) * ABfreq * .5)) / (1 - Prev)
+```
+
+```{r}
+Vcases <- casesdaf * (1 - casesdaf)
+```
+
+```{r}
+Vcontrols <- controlsdaf * (1 - controlsdaf)
+```
+
+```{r}
+ncp <- (casesdaf - controlsdaf) / sqrt(.5*((Vcases/cases) + (Vcontrols/controls)))
+```
+
+```{r}
+C <- -qnorm(alpha/2)
+```
+
+```{r}
+pnorm(-C-ncp, lower.tail = TRUE) + pnorm(C - ncp, lower.tail = FALSE)
+```
+
+## Power in phenome scans
+
+```{r}
+N <- 1000
+```
+
+```{r}
+R2 <- 0.01
+```
+
+```{r}
+ncp <- (N * R2) / (1 - R2)
+```
+
+```{r}
+alpha <- 0.05
+```
+
+```{r}
+1 - pnorm(qnorm(1 - alpha/2) - sqrt(ncp)) + pnorm(qnorm(alpha/2) - sqrt(ncp))
+```
+
+## Power in survival analyses
+
+Assuming an effect size of 10% higher hazard for every 1 SD increase in each PRS, and incidence of 5 - 10%
+
+```{r}
+library(powerSurvEpi)
+```
+
+```{r}
+ssizeEpiCont.default(
+    power = .8, 
+    theta = 1.05, 
+    sigma2 = 1, 
+    psi = c(0.05, 0.1, 0.5),
+    rho2 = 0, 
+    alpha = 0.05
+)
+```
+

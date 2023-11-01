@@ -1,0 +1,155 @@
+---
+title: An R Markdown document converted from "26_MRCTGWAS.ipynb"
+output: html_document
+---
+
+# Cross-trait GWAS of T2D and exposures found
+
+## Libraries
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(CGWAS)
+```
+
+## File names
+
+```{r}
+snpinfo <- "../data/mr_traits/snpinfo.tsv"
+mafdat <- "../data/mr_traits/mafdat.tsv"
+```
+
+## Directory of crude input files
+
+```{r}
+crude_tabs <- list.files("../data/mr_traits/cleaned", full.names = TRUE)
+```
+
+```{r}
+exposures <- gsub("\\.tsv", "", basename(crude_tabs))
+```
+
+```{r}
+exposures
+```
+
+```{r}
+names(crude_tabs) <- exposures
+```
+
+```{r}
+crude_tabs
+```
+
+## In case more analyses are needed
+
+Listing analyses done:
+
+```{r}
+done <- list.files("../data/mr_traits/ctg")
+done
+```
+
+Difference with cleaned GWAS ready to be analysed:
+
+```{r}
+todo <- setdiff(exposures, done)
+todo
+```
+
+```{r}
+exposures <- exposures[exposures %in% todo]
+exposures
+```
+
+## Running cross-trait GWAS
+
+```{r}
+for(EXPOSURE in exposures){
+    ## Importing data
+    ct_dat <- read_tsv(
+        crude_tabs[EXPOSURE],
+        col_names = c(
+            "chrom", "pos", "rsid",
+            paste(c("ea", "nea", "eaf", "beta", "se", "pval"), "t2d", sep = "_"),
+            paste(c("eaf", "beta", "se", "pval"), "cad", sep = "_"),
+            paste(c("nea", "ea", "beta", "se", "eaf"), "exp", sep = "_")
+        ),
+        col_types = "nncccnnnnnnnn--------ccnnn"
+    ) %>%
+    ## Harmonizing to the allele increasing T2D
+    mutate(
+        across(
+            c(ea_exp, nea_exp),
+               ~stringr::str_replace_all(.x, c("A" = "t", "T" = "a", "C" = "g", "G" = "c")),
+               .names = "{.col}_flip"
+        ),
+        across(
+            c(ea_exp_flip, nea_exp_flip),
+            ~toupper(.x)
+        ),
+        harmon1 = case_when(ea_t2d == ea_exp & nea_t2d == nea_exp ~ 1,
+                            ea_t2d == nea_exp & nea_t2d == ea_exp ~ -1,
+                            TRUE ~ NaN),
+        harmon2 = case_when(ea_t2d == ea_exp_flip & nea_t2d == nea_exp_flip ~ 1,
+                            ea_t2d == nea_exp_flip & nea_t2d == ea_exp_flip ~ -1,
+                            TRUE ~ NaN),
+        harmon = coalesce(harmon1, harmon2),
+        beta_exp = beta_exp * harmon,
+        eaf_exp = ifelse(harmon == 1, eaf_exp, 1 - eaf_exp),
+        pval_exp = 2 * pnorm(-abs(beta_exp/se_exp))
+    ) %>%
+    filter(!is.na(harmon), abs(eaf_exp - eaf_t2d) < .2) %>%
+    select(chrom, pos, rsid, ea_t2d, nea_t2d, 
+           all_of(c(paste(c("eaf", "beta", "se", "pval"), "t2d", sep = "_"),
+                    paste(c("eaf", "beta", "se", "pval"), "cad", sep = "_"),
+                    paste(c("eaf", "beta", "se", "pval"), "exp", sep = "_"))))
+    ## Saving cleaned exposure table
+    write_tsv(ct_dat, crude_tabs[EXPOSURE])
+    ## SNP INFO
+    write_tsv(
+        transmute(
+            ct_dat, 
+            CHR = chrom, BP = pos, 
+            SNP = paste(chrom, pos, ea_t2d, nea_t2d, sep = ":")
+        ),
+        snpinfo
+    )
+    ## MAF Data
+    write_tsv(
+        transmute(
+            ct_dat, 
+            MAF = ifelse(eaf_t2d < .5, eaf_t2d, 1 - eaf_t2d)
+        ), 
+        mafdat
+    )
+    ## Preparing output directory
+    expfolder <- paste0("../data/mr_traits/ctg/", EXPOSURE)
+    dir.create(expfolder)
+    traitpair <- c("t2d", "exp")
+    ## Preparing input files
+    inputfiles <- paste0(expfolder, "/", traitpair, ".tsv")
+    names(inputfiles) <- traitpair
+    for(trait in traitpair){
+        write_tsv(
+            select(
+                ct_dat, 
+                BETA = paste0("beta_", trait),
+                P = paste0("pval_", trait)
+            ),
+            inputfiles[trait]
+        )
+    }
+    ## Running cross-trait GWAS
+    cgwas(
+        gwasFilePath = inputfiles, 
+        snpFilePath = snpinfo, 
+        outputPath = expfolder,
+        traitName = traitpair,
+        mrafFilePath = mafdat,
+        threadN = 8
+    )
+}
+```
+

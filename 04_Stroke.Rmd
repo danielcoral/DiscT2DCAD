@@ -1,0 +1,148 @@
+---
+title: An R Markdown document converted from "04_Stroke.ipynb"
+output: html_document
+---
+
+# Discordance between T2D and stroke
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(ggplot2)
+```
+
+## Cleaned T2D GWAS
+
+```{r}
+t2d <- read_tsv("../data/t2d.tsv", show_col_types = FALSE)
+head(t2d)
+```
+
+## Stroke GWAS
+
+Results from [Mishra et al 2022](https://doi.org/10.1038/s41586-022-05165-3):
+
+```{r}
+stroke <- read_tsv("~/projects/DVA/Data/GWAS_sumstats/AIS.tsv.gz",
+                   skip = 1,
+                   col_names = c("chrom", "pos",
+                                 paste(c("eaf", "beta", "se", "pval", "ea", "nea"), "stroke", sep = "_")),
+                   col_types = "nnnnnn---cc")
+head(stroke)
+```
+
+## Cleaning Stroke GWAS
+
+- Filtering indels:
+
+```{r}
+stroke <- stroke %>%
+    filter(
+        nchar(ea_stroke) == 1,
+        nchar(ea_stroke) == 1
+    )
+```
+
+- Filtering MAF > 1%
+
+```{r}
+stroke <- stroke %>%
+    mutate(maf_stroke = ifelse(eaf_stroke < .5, eaf_stroke, 1 - eaf_stroke)) %>%
+    filter(maf_stroke >= 0.01)
+```
+
+- Filtering ambiguous palindromic SNPs (MAF > 40%):
+
+```{r}
+stroke <- stroke %>%
+    mutate(palind1 = ea_stroke %in% c("A", "T") & nea_stroke %in% c("A", "T"),
+           palind2 = ea_stroke %in% c("C", "G") & nea_stroke %in% c("C", "G"),
+           palind = palind1 | palind2,
+           palind_ambig = palind & maf_stroke > .4) %>%
+    filter(!palind_ambig) %>%
+    select(-c(palind1, palind2, palind, palind_ambig))
+```
+
+## Intersection
+
+Both results are mapped to the hg19 genome build:
+
+```{r}
+t2d_stroke <- t2d %>%
+    inner_join(stroke) %>%
+    filter(abs(maf_stroke - maf_t2d) < .2) %>%
+    select(-c(maf_stroke, maf_t2d)) %>%
+    mutate(
+        across(
+            c(ea_stroke, nea_stroke),
+               ~stringr::str_replace_all(.x, c("A" = "t", "T" = "a", "C" = "g", "G" = "c")),
+               .names = "{.col}_flip"
+        ),
+        across(
+            c(ea_stroke_flip, nea_stroke_flip),
+            ~toupper(.x)
+        ),
+        harmon1 = case_when(ea_t2d == ea_stroke & nea_t2d == nea_stroke ~ 1,
+                            ea_t2d == nea_stroke & nea_t2d == ea_stroke ~ -1,
+                            TRUE ~ NaN),
+        harmon2 = case_when(ea_t2d == ea_stroke_flip & nea_t2d == nea_stroke_flip ~ 1,
+                            ea_t2d == nea_stroke_flip & nea_t2d == ea_stroke_flip ~ -1,
+                            TRUE ~ NaN),
+        harmon = coalesce(harmon1, harmon2),
+        beta_stroke = beta_stroke * harmon,
+        eaf_stroke = ifelse(harmon == 1, eaf_stroke, 1 - eaf_stroke)
+    ) %>%
+    filter(!is.na(harmon)) %>%
+    select(chrom, pos, rsid, ea_t2d, nea_t2d, 
+           all_of(c(paste(c("eaf", "beta", "se", "pval"), "t2d", sep = "_"),
+                    paste(c("eaf", "beta", "se", "pval"), "stroke", sep = "_")))) %>%
+    arrange(chrom, pos)
+head(t2d_stroke)
+nrow(t2d_stroke)
+```
+
+```{r}
+write_tsv(t2d_stroke, "../data/t2d_stroke.tsv")
+```
+
+## Effects of genome-wide significant T2D variants on stroke
+
+```{r}
+options(repr.plot.width = 7, repr.plot.height = 5, repr.plot.res = 180)
+t2d_stroke %>%
+    filter(pval_t2d < 5e-8) %>%
+    mutate(sign_stroke = ifelse(beta_stroke > 0, "orangered", "forestgreen")) %>%
+    ggplot(aes(beta_t2d, beta_stroke)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "blue") +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "blue") +
+    geom_point(aes(color = sign_stroke), alpha = .5) +
+    scale_color_identity(
+        labels = c("Discordant", "Concordant"),
+        guide = guide_legend(title = "Sign of stroke association")
+    ) +
+    theme_bw() +
+    labs(x = "T2D Log OR", y = "Stroke Log OR")
+```
+
+## Significant signals for both traits
+
+Lowering threshold to 1e-5
+
+```{r}
+options(repr.plot.width = 7, repr.plot.height = 5, repr.plot.res = 180)
+t2d_stroke %>%
+    filter(pval_t2d < 1e-5, pval_stroke < 1e-5) %>%
+    mutate(sign_stroke = ifelse(beta_stroke > 0, "orangered", "forestgreen")) %>%
+    ggplot(aes(beta_t2d, beta_stroke)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "blue") +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "blue") +
+    geom_point(aes(color = sign_stroke), alpha = .5) +
+    scale_color_identity(
+        labels = c("Discordant", "Concordant"),
+        guide = guide_legend(title = "Sign of stroke association")
+    ) +
+    theme_bw() +
+    labs(x = "T2D Log OR", y = "Stroke Log OR")
+```
+

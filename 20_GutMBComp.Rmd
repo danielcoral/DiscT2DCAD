@@ -1,0 +1,112 @@
+---
+title: An R Markdown document converted from "20_GutMBComp.ipynb"
+output: html_document
+---
+
+# Profile comparison - Gut microbiome
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(purrr)
+```
+
+```{r}
+gutmbmeta <- read_tsv("../data/gutmbmeta.tsv", show_col_types = FALSE)
+head(gutmbmeta)
+```
+
+```{r}
+length(unique(gutmbmeta$name_mb))
+```
+
+```{r}
+gutmbcomp <- gutmbmeta %>%
+    group_by(trait, taxa, name_mb) %>%
+    nest %>%
+    ungroup
+print(gutmbcomp)
+```
+
+```{r}
+gutmbcomp <- gutmbcomp %>%
+    mutate(
+        twoprofiles = map_lgl(
+            data,
+            ~all(c("Concordant", "Discordant") %in% .x$profile)
+        )
+    )
+print(gutmbcomp)
+```
+
+```{r}
+gutmbcomp %>%
+    ungroup %>%
+    count(trait, twoprofiles)
+```
+
+```{r}
+gutmbcomp <- gutmbcomp %>%
+    filter(twoprofiles)
+print(gutmbcomp)
+```
+
+```{r}
+gutmbcomp <- gutmbcomp %>%
+    mutate(
+        Nconc = map_dbl(
+            data,
+            ~.x$Qdf[.x$profile == "Concordant"] + 1
+        ),
+        Ndisc = map_dbl(
+            data,
+            ~.x$Qdf[.x$profile == "Discordant"] + 1
+        )
+    )
+print(gutmbcomp)
+```
+
+```{r}
+gutmbcomp %>%
+    count(trait, Nconc, Ndisc)
+```
+
+```{r}
+gutmbcomp <- gutmbcomp %>%
+    filter(Nconc > 2, Ndisc > 2)
+print(gutmbcomp)
+```
+
+```{r}
+gutmbcomp <- gutmbcomp %>%
+    transmute(
+        trait, taxa, name_mb,
+        beta_comp = map_dbl(data, ~abs(diff(.x$beta_meta))),
+        se_comp = map_dbl(data, ~sqrt(sum(.x$se_meta^2))),
+        pval_comp = 2 * pnorm(-abs(beta_comp / se_comp))
+    )
+head(gutmbcomp)
+```
+
+```{r}
+gutmbcompsig <- gutmbcomp %>%
+    filter(p.adjust(pval_comp, "fdr") <= 0.05)
+head(gutmbcompsig)
+```
+
+```{r}
+gutmbcompsug <- gutmbcomp %>%
+    filter(pval_comp <= 0.01)
+gutmbcompsug
+```
+
+```{r}
+gutmbcompsug %>%
+    inner_join(gutmbmeta)
+```
+
+```{r}
+write_tsv(gutmbcompsug, "../data/gutmbcompsug.tsv")
+```
+

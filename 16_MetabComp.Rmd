@@ -1,0 +1,112 @@
+---
+title: An R Markdown document converted from "16_MetabComp.ipynb"
+output: html_document
+---
+
+# Profile comparison - Metabolites
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(purrr)
+```
+
+```{r}
+metabmeta <- read_tsv("../data/metabmeta.tsv", show_col_types = FALSE)
+head(metabmeta)
+```
+
+```{r}
+length(unique(metabmeta$id_exp))
+```
+
+```{r}
+metabcomp <- metabmeta %>%
+    group_by(trait, id_exp, name_exp) %>%
+    nest %>%
+    ungroup
+print(metabcomp)
+```
+
+```{r}
+metabcomp <- metabcomp %>%
+    mutate(
+        twoprofiles = map_lgl(
+            data,
+            ~all(c("Concordant", "Discordant") %in% .x$profile)
+        )
+    )
+print(metabcomp)
+```
+
+```{r}
+metabcomp %>%
+    ungroup %>%
+    count(trait, twoprofiles)
+```
+
+```{r}
+metabcomp <- metabcomp %>%
+    filter(twoprofiles)
+print(metabcomp)
+```
+
+```{r}
+metabcomp <- metabcomp %>%
+    mutate(
+        Nconc = map_dbl(
+            data,
+            ~.x$Qdf[.x$profile == "Concordant"] + 1
+        ),
+        Ndisc = map_dbl(
+            data,
+            ~.x$Qdf[.x$profile == "Discordant"] + 1
+        )
+    )
+print(metabcomp)
+```
+
+```{r}
+metabcomp %>%
+    count(trait, Nconc, Ndisc)
+```
+
+```{r}
+metabcomp <- metabcomp %>%
+    filter(Nconc > 2, Ndisc > 2)
+print(metabcomp)
+```
+
+```{r}
+metabcomp <- metabcomp %>%
+    transmute(
+        trait, id_exp, name_exp,
+        beta_comp = map_dbl(data, ~abs(diff(.x$beta_meta))),
+        se_comp = map_dbl(data, ~sqrt(sum(.x$se_meta^2))),
+        pval_comp = 2 * pnorm(-abs(beta_comp / se_comp))
+    )
+head(metabcomp)
+```
+
+```{r}
+metabcompsig <- metabcomp %>%
+    filter(p.adjust(pval_comp, "fdr") <= 0.05)
+head(metabcompsig)
+```
+
+```{r}
+nrow(metabcompsig)
+```
+
+```{r}
+metabcompsig %>%
+    arrange(pval_comp) %>%
+    pull(name_exp) %>%
+    print
+```
+
+```{r}
+write_tsv(metabcompsig, "../data/metabcompsig.tsv")
+```
+

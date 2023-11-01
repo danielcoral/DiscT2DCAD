@@ -1,0 +1,29 @@
+---
+title: An R Markdown document converted from "21_ProtPheWAS.ipynb"
+output: html_document
+---
+
+# Phenome-wide scan - Proteins
+
+```{r}
+proxiestab <- readr::read_tsv("../data/proxiestab.tsv", show_col_types = FALSE)
+variants <- unique(proxiestab$rsid_proxy)
+variants <- split(variants, f = ceiling(1:length(variants)/20))
+batches_to_use <- "prot-a"
+protphewasres <- NULL
+for(snpbatch in 1:length(variants)){
+    message(paste("Querying batch", snpbatch, "of", length(variants)), ".")
+    res <- ieugwasr::phewas(variants = variants[[snpbatch]], pval = 1, batch = batches_to_use)
+    while(class(res)[1] == "response"){
+        message("Waiting 1 minute for server to respond...")
+        Sys.sleep(60)
+        message("Retrying...")
+        res <- ieugwasr::phewas(variants = variants[[snpbatch]], pval = 1, batch = batches_to_use)
+    }
+    protphewasres <- rbind(protphewasres, res)
+    message("Done!")
+    Sys.sleep(5)
+}
+readr::write_tsv(protphewasres, "../data/protphewasres.tsv")
+```
+

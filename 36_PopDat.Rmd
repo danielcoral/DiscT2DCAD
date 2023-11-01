@@ -1,0 +1,531 @@
+---
+title: An R Markdown document converted from "36_PopDat.ipynb"
+output: html_document
+---
+
+# Covariates for PRS analyses
+
+---
+
+## Libraries
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(purrr)
+```
+
+---
+
+## Baseline data
+
+```{r}
+tab_name <- "~/projects/DVA/Data/UKBiobank/ukb_57232/data_files/41806.tab"
+```
+
+Locating columns needed:
+
+```{r}
+tab_vars <- tribble(
+    ~colid, ~colnam, ~coltyp,
+    ## Basic
+    "f.eid", "eid", "n",
+    "f.53.0.0", "date0", "D",
+    "f.31.0.0", "sex", "n",
+    "f.21003.0.0", "age", "n",
+    "f.4080.0.0", "sbp_01", "n",
+    "f.4080.0.1", "sbp_02", "n",
+    "f.30700.0.0", "creatinine", "n",
+    "f.30760.0.0", "hdl", "n",
+    "f.30780.0.0", "ldl", "n",
+    "f.30870.0.0", "tg", "n",
+    "f.30750.0.0", "hba1c", "n",
+    "f.1239.0.0", "current_smoker", "n",
+    "f.22006.0.0", "caucasian", "n",
+    "f.22001.0.0", "genetic_sex", "n",
+    "f.22019.0.0", "sexchr_aneuploidy", "n",
+    "f.22020.0.0", "usedingpc", "n",
+    "f.2724.0.0", "menopause", "n"
+) %>%
+    bind_rows(
+        tibble(
+            colid = paste0("f.22009.0.", 1:10),
+            colnam = paste0("gpc", 1:10),
+            coltyp = "n"
+        )
+    )
+```
+
+```{r}
+tab_vars <- paste("head -1", tab_name, "| tr '\t' '\n'") %>%
+    pipe %>%
+    read_table(col_names = "colid", col_types = "c") %>%
+    ## Position of columns in table
+    mutate(colpos = row_number()) %>%
+    ## Extracting position and name of variables of interest
+    inner_join(tab_vars, by = "colid")
+head(tab_vars)
+```
+
+```{r}
+column_cmd <- paste("cut -f", paste(tab_vars$colpos, collapse = ","), tab_name)
+cat(column_cmd)
+```
+
+```{r}
+crude_dat <- read_tsv(
+    file = pipe(column_cmd),
+    ## Replacing column header with variable names
+    skip = 1, col_names = tab_vars$colnam,
+    col_types = paste(tab_vars$coltyp, collapse = "")
+)
+head(crude_dat)
+```
+
+```{r}
+recoded_dat <- crude_dat %>%
+    filter(
+        caucasian == 1,
+        sex == genetic_sex,
+        usedingpc == 1,
+        is.na(sexchr_aneuploidy)
+    ) %>%
+    select(-c(caucasian, genetic_sex, usedingpc, sexchr_aneuploidy)) %>%
+    transmute(
+        eid, age, 
+        sex = ifelse(sex == 0, "Female", "Male"),
+        sbp = rowMeans(cbind(sbp_01, sbp_02), na.rm = TRUE),
+        scr = creatinine / 88.42,
+        alpha = case_when(sex == "Female" ~ -0.241, sex == "Male" ~ -0.302),
+        kappa = case_when(sex == "Female" ~ 0.7, sex == "Male" ~ 0.9),
+        creat_kappa = scr / kappa,
+        minkappa = pmin(creat_kappa, 1), 
+        maxkappa = pmax(creat_kappa, 1),
+        minkappa_alpha = minkappa^alpha,
+        maxkappa_exp = maxkappa^(-1.200),
+        age_term = 0.9938^age,
+        sex_term = case_when(sex == "Female" ~ 1.012, sex == "Male" ~ 1), 
+        egfr = 142 * minkappa_alpha * maxkappa_exp * age_term * sex_term,
+        hdl, hba1c,
+        tchol = hdl + ldl + (tg/2.2),
+        smoking = case_when(current_smoker %in% c(1,2) ~ 1,
+                            current_smoker == 0 ~ 0,
+                            TRUE ~ NaN),
+        menopause = replace_na(1*(menopause == 1), 0),
+        across(starts_with("gpc"))
+    ) %>%
+    select(-c(scr, alpha, kappa, creat_kappa, minkappa, maxkappa,
+              minkappa_alpha, maxkappa_exp, age_term, sex_term))
+head(recoded_dat)
+nrow(recoded_dat)
+```
+
+```{r}
+write_tsv(recoded_dat, "../data/recoded_dat.tsv")
+```
+
+## Non-cancer illness codes
+
+```{r}
+tab_vars <- tibble(
+    colid = "f.eid",
+    colnam = "eid"
+) %>%
+    bind_rows(
+        data.frame(colid = paste0("f.20002.0.", 0:33),
+                   colnam = paste("noncancercode", 1:34, sep = "_")),
+        data.frame(colid = paste0("f.20009.0.", 0:33),
+                   colnam = paste("noncancerage", 1:34, sep = "_"))
+    )
+tab_vars <- paste("head -1", tab_name, "| tr '\t' '\n'") %>%
+    pipe %>%
+    read_table(col_names = "colid", col_types = "c") %>%
+    ## Position of columns in table
+    mutate(colpos = row_number()) %>%
+    ## Extracting position and name of variables of interest
+    inner_join(tab_vars, by = "colid")
+head(tab_vars)
+```
+
+```{r}
+column_cmd <- paste("cut -f", paste(tab_vars$colpos, collapse = ","), tab_name)
+cat(column_cmd)
+```
+
+```{r}
+dx_dat <- read_tsv(
+    file = pipe(column_cmd),
+    ## Replacing column header with variable names
+    skip = 1, col_names = tab_vars$colnam,
+    ## All columns are numeric
+    col_types = cols(.default = "n")
+)
+head(dx_dat)
+```
+
+Long format
+
+```{r}
+dx_dat2 <- dx_dat %>%
+    pivot_longer(
+        -eid,
+        names_sep = "_",
+        names_to = c(".value", NA)
+    )
+head(dx_dat2)
+```
+
+Joining with coding:
+
+```{r}
+dx_coding <- read_tsv("~/projects/DVA/Data/UKBiobank/ukb_57232/codings/coding6.tsv",
+                      show_col_types = FALSE)
+head(dx_coding)
+```
+
+```{r}
+dx_dat2 <- dx_dat2 %>%
+    left_join(dx_coding[, c("coding", "meaning")],
+               by = c("noncancercode" = "coding"))
+head(dx_dat2)
+```
+
+### Selection of diseases for adjustment
+
+```{r}
+selected_dx <- dx_dat2 %>%
+    group_by(eid) %>%
+    summarise(
+        HT = any(meaning %in% c("hypertension", 
+                                "essential hypertension"), 
+                 na.rm = TRUE),
+        CKD = any(meaning %in% c("renal/kidney failure", "renal failure requiring dialysis",
+                                 "renal failure not requiring dialysis"),
+                  na.rm = TRUE),
+        T2D = (any(meaning %in% c("diabetes", "type 2 diabetes", "diabetic eye disease", 
+                                  "diabetic neuropathy/ulcers"), na.rm = TRUE) &
+               !any(meaning %in% c("type 1 diabetes"), na.rm = TRUE)),
+        T2Dage = replace_na(
+            sort(
+                noncancerage[
+                    meaning %in% c(
+                        "diabetes", "type 2 diabetes", 
+                        "diabetic eye disease", "diabetic neuropathy/ulcers"
+                    ) & noncancerage > 0
+                ]
+            )[1],
+            0
+        ),
+        T1D = any(meaning == "type 1 diabetes", na.rm = TRUE)
+    ) %>%
+    mutate(
+        across(where(is.logical), ~.x * 1),
+        T1D = ifelse(T2D == 1 & T2Dage < 35, 1, T1D),
+        T2Dage = ifelse(T2D == 1 & T1D == 0, T2Dage, 0),
+        T1D = NULL
+    )
+head(selected_dx)
+```
+
+## Medication data
+
+```{r}
+tab_vars <- tibble(
+    colid = "f.eid",
+    colnam = "eid",
+) %>%
+    bind_rows(
+        data.frame(colid = paste0("f.20003.0.", 0:47),
+                   colnam = paste("medcode", 1:48, sep = "_"))
+    )
+tab_vars <- paste("head -1", tab_name, "| tr '\t' '\n'") %>%
+    pipe %>%
+    read_table(col_names = "colid", col_types = "c") %>%
+    ## Position of columns in table
+    mutate(colpos = row_number()) %>%
+    ## Extracting position and name of variables of interest
+    inner_join(tab_vars, by = "colid")
+head(tab_vars)
+```
+
+```{r}
+column_cmd <- paste("cut -f", paste(tab_vars$colpos, collapse = ","), tab_name)
+cat(column_cmd)
+```
+
+```{r}
+meds_dat <- read_tsv(
+    file = pipe(column_cmd),
+    ## Replacing column header with variable names
+    skip = 1, col_names = tab_vars$colnam,
+    ## All columns are numeric
+    col_types = cols(.default = "n")
+)
+head(meds_dat)
+```
+
+Long format
+
+```{r}
+meds_dat2 <- meds_dat %>%
+    pivot_longer(
+        -eid,
+        names_sep = "_",
+        names_to = c(".value", NA)
+    )
+head(meds_dat2)
+```
+
+Joining with coding:
+
+```{r}
+meds_coding <- read_tsv("~/projects/DVA/Data/UKBiobank/ukb_57232/codings/coding4.tsv",
+                      show_col_types = FALSE)
+head(meds_coding)
+```
+
+```{r}
+meds_dat2 <- meds_dat2 %>%
+    left_join(meds_coding,
+               by = c("medcode" = "coding"))
+head(meds_dat2)
+```
+
+Map of UK Biobank medication to ATC codes (available for some medications only):
+
+```{r}
+ATC_matches <- read_tsv("~/projects/DVA/Data/UKBiobank/ukb_57232/codings/ATC_matches.tsv", 
+                        col_types = "ncc")
+head(ATC_matches)
+```
+
+Selected codes to use:
+
+- A10A - Insulin
+- A10B - Diabetes drugs
+- C01 - Cardiac therapy
+- C02 - Antihypertensives
+- C03 - Diuretics
+- C07 - Beta blocking agents
+- C08 - Calcium channel blockers
+- C09 - RA system drugs
+- C10 - Lipid lowering
+
+```{r}
+ATC_matches_sel <- ATC_matches %>%
+    filter(grepl("^A10|^C01|^C02|^C03|^C07|^C08|^C09|^C10", ATC_codes)) %>%
+    unique
+head(ATC_matches_sel)
+```
+
+```{r}
+selmeds <- meds_dat2 %>%
+    left_join(ATC_matches_sel, by = c("medcode" = "ukb_code", 
+                                       "meaning" = "med_name"))
+head(selmeds)
+```
+
+Ocurrence of selected medication:
+
+```{r}
+selected_meds <- selmeds %>%
+    group_by(eid) %>%
+    summarise(
+        Insulin = any(ATC_codes %in% c("A10A"), na.rm = TRUE),
+        AntiDM = any(ATC_codes %in% c("A10B"), na.rm = TRUE),
+        AntiHT = any(grepl("^C01|^C02|^C03|^C07|^C08|^C09", ATC_codes), na.rm = TRUE),
+        LipidLower = any(grepl("^C10", ATC_codes), na.rm = TRUE)
+    ) %>%
+    mutate(across(-eid, ~.x * 1)) %>%
+    right_join(meds_dat[,"eid"], by = "eid") %>%
+    mutate(across(-eid, ~replace_na(.x, 0)))
+head(selected_meds)
+nrow(selected_meds)
+```
+
+## Diagnosis and medication data
+
+```{r}
+dxmed <- inner_join(selected_dx, selected_meds, by = "eid")
+head(dxmed)
+```
+
+```{r}
+write_tsv(dxmed, "../data/dxmed.tsv")
+```
+
+## MACE data from hospital and death records
+
+### Ocurrences in hospital records
+
+Hospital records - main table:
+
+```{r}
+hesin <- read_tsv(
+    "~/projects/DVA/Data/UKBiobank/ukb_57232/hes_data/hesin.txt",
+    guess_max = 50000, show_col_types = FALSE
+)
+print(data.frame(head(hesin)))
+```
+
+Hospital records - Diagnosis table:
+
+```{r}
+hesin_diag <- read_tsv(
+    "~/projects/DVA/Data/UKBiobank/ukb_57232/hes_data/hesin_diag.txt", 
+    skip = 1,
+    col_types = "nnn-c-c-",
+    col_names = c("eid", "ins_index", "arr_index", "diag_icd9", "diag_icd10")
+)
+head(hesin_diag)
+```
+
+Joining tables:
+
+```{r}
+hesin_join <- hesin %>%
+    transmute(eid, ins_index, 
+              event_date = coalesce(epistart, epiend, elecdate, admidate, epiend, disdate),
+              event_date = lubridate::dmy(event_date)) %>%
+    inner_join(hesin_diag) %>%
+    select(-c(ins_index, arr_index)) %>%
+    rename(ICD_9 = diag_icd9, ICD_10 = diag_icd10) %>%
+    pivot_longer(c(ICD_9, ICD_10), names_to = "CODESYS", values_to = "CODE", values_drop_na = TRUE)
+head(hesin_join)
+```
+
+### Occurrences from mortality data
+
+Mortality data - date:
+
+```{r}
+mordate <- read_tsv("~/projects/DVA/Data/UKBiobank/ukb_57232/mortality/death.txt", show_col_types = FALSE)
+head(mordate)
+```
+
+Mortality data - cause:
+
+```{r}
+morcause <- read_tsv("~/projects/DVA/Data/UKBiobank/ukb_57232/mortality/death_cause.txt", show_col_types = FALSE)
+head(morcause)
+```
+
+Mortality - Join tables:
+
+```{r}
+mor <- inner_join(mordate, morcause) %>%
+    transmute(eid, 
+              event_date = lubridate::dmy(date_of_death),
+              CODESYS = "ICD_10", CODE = cause_icd10)
+head(mor)
+```
+
+### Joining occurrences
+
+```{r}
+hesmort_outcomes <- bind_rows(
+    hesin_join, mor
+)
+head(hesmort_outcomes)
+```
+
+### Finding MACE events
+
+MACE codes:
+
+```{r}
+mace_codes <- read_tsv("../data/MACE_CODES.tsv", show_col_types = FALSE)
+head(mace_codes)
+```
+
+```{r}
+outcome_lookup <- mace_codes %>%
+    group_by(OUTCOME, CODESYS) %>%
+    nest %>%
+    mutate(
+        data = map_chr(data, ~paste0("^", .x$CODE, collapse = "|"))
+    ) %>%
+    ungroup
+outcome_lookup
+```
+
+```{r}
+outcome_lookup_res <- outcome_lookup %>%
+    transmute(
+        outcome = OUTCOME,
+        res = map2(
+            CODESYS, data,
+            ~hesmort_outcomes %>% 
+                filter(CODESYS == .x, 
+                       grepl(.y, CODE)) %>%
+                select(eid, event_date)
+        )
+    ) %>%
+    unnest(res) %>%
+    unique
+head(outcome_lookup_res)
+```
+
+### Joining all occurrences of MACE
+
+```{r}
+allocurrmace <- outcome_lookup_res %>%
+    transmute(eid, outcome_value = 1, outcome_date = event_date)
+head(allocurrmace)
+```
+
+### First and last date for all individuals
+
+```{r}
+censordate <- lubridate::ymd("2018-02-28")
+```
+
+```{r}
+datedat <- mor %>%
+    select(eid, lastdate = event_date) %>%
+    group_by(eid) %>%
+    slice_min(lastdate, with_ties = FALSE) %>%
+    ungroup %>%
+    right_join(crude_dat[,c("eid", "date0")]) %>%
+    transmute(
+        eid, date0, 
+        lastdate = replace_na(lastdate, censordate),
+        lastdate = if_else(lastdate > censordate, censordate, lastdate),
+        lastdate = if_else(lastdate > date0 + lubridate::years(10), 
+                           date0 + lubridate::years(10), lastdate)
+    ) %>%
+    drop_na
+head(datedat)
+nrow(datedat)
+```
+
+### Survival data including prior MACE
+
+```{r}
+survmacedat <- datedat %>%
+    left_join(allocurrmace, by = "eid") %>%
+    mutate(
+        outcome_value = replace_na(outcome_value, 0),
+        outcome_date = coalesce(outcome_date, lastdate),
+        outcome_value = if_else(outcome_date > lastdate, 0, outcome_value),
+        outcome_date = if_else(outcome_date > lastdate, lastdate, outcome_date),
+        priorMACE_timeyrs = pmin(0, as.numeric(lubridate::interval(date0, outcome_date), "years")),
+        outcome_value = ifelse(priorMACE_timeyrs < 0, 0, outcome_value),
+        outcome_date = if_else(priorMACE_timeyrs < 0, lastdate, outcome_date),
+        outcome_timeyrs = as.numeric(lubridate::interval(date0, outcome_date), "years")
+    ) %>%
+    unique %>%
+    group_by(eid) %>%
+    mutate(priorMACE_timeyrs = min(priorMACE_timeyrs)) %>%
+    slice_min(outcome_timeyrs, with_ties = FALSE) %>%
+    ungroup %>%
+    mutate(priorMACE = 1 * (priorMACE_timeyrs < 0)) %>%
+    select(eid, outcome_value, outcome_timeyrs, priorMACE, priorMACE_timeyrs)
+head(survmacedat)
+```
+
+```{r}
+write_tsv(survmacedat, "../data/survmacedat.tsv")
+```
+

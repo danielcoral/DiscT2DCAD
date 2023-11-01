@@ -1,0 +1,31 @@
+---
+title: An R Markdown document converted from "32_eQTLGenPheWAS.ipynb"
+output: html_document
+---
+
+# Phenome-wide scan - Blood eQTLs
+
+```{r}
+proxiestab <- readr::read_tsv("../data/proxiestab.tsv", show_col_types = FALSE)
+variants <- unique(proxiestab$rsid_proxy)
+variants <- split(variants, f = ceiling(1:length(variants)/25))
+batches_to_use <- c("eqtl-a")
+## Here we use the significance threshold of the original paper (Vosa et al 2018)
+pval_thresh <- 1.83e-5
+eqtlgenphewasres <- NULL
+for(snpbatch in 1:length(variants)){
+    message(paste("Querying batch", snpbatch, "of", length(variants)), ".")
+    res <- ieugwasr::phewas(variants = variants[[snpbatch]], pval = pval_thresh, batch = batches_to_use)
+    while(class(res)[1] == "response"){
+        message("Waiting 1 minute for server to respond...")
+        Sys.sleep(60)
+        message("Retrying...")
+        res <- ieugwasr::phewas(variants = variants[[snpbatch]], pval = pval_thresh, batch = batches_to_use)
+    }
+    eqtlgenphewasres <- rbind(eqtlgenphewasres, res)
+    message("Done!")
+    Sys.sleep(5)
+}
+readr::write_tsv(eqtlgenphewasres, "../data/eqtlgenphewasres.tsv")
+```
+

@@ -1,0 +1,160 @@
+---
+title: An R Markdown document converted from "22_ProtPheWASRes.ipynb"
+output: html_document
+---
+
+# Results of PheWAS - Proteins
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(purrr)
+```
+
+```{r}
+protphewasres <- read_tsv("../data/protphewasres.tsv", show_col_types = FALSE)
+head(protphewasres)
+```
+
+```{r}
+protphewasres <- protphewasres %>%
+    filter(!is.na(eaf)) %>%
+    transmute(rsid_proxy = rsid, ea_exp = ea, nea_exp = nea, eaf_exp = eaf, 
+              id_exp = id, name_exp = trait, beta_exp = beta, se_exp = se)
+head(protphewasres)
+```
+
+```{r}
+proxiestab <- readr::read_tsv("../data/proxiestab.tsv", show_col_types = FALSE)
+head(proxiestab)
+```
+
+```{r}
+protphewasres <- inner_join(proxiestab, protphewasres, by = "rsid_proxy", relationship = "many-to-many")
+head(protphewasres)
+```
+
+```{r}
+protphewasres <- protphewasres %>%
+    mutate(
+        across(
+            c(ea_exp, nea_exp),
+            ~stringr::str_replace_all(.x, c("A" = "t", "T" = "a", "C" = "g", "G" = "c")),
+            .names = "{.col}_flip"
+        ),
+        across(
+            c(ea_exp_flip, nea_exp_flip),
+            ~toupper(.x)
+        ),
+        harmon1 = case_when(ea_proxy == ea_exp & nea_proxy == nea_exp ~ 1,
+                            ea_proxy == nea_exp & nea_proxy == ea_exp ~ -1,
+                            TRUE ~ NaN),
+        harmon2 = case_when(ea_proxy == ea_exp_flip & nea_proxy == nea_exp_flip ~ 1,
+                            ea_proxy == nea_exp_flip & nea_proxy == ea_exp_flip ~ -1,
+                            TRUE ~ NaN),
+        harmon = coalesce(harmon1, harmon2),
+        beta_exp = beta_exp * harmon,
+        eaf_exp = ifelse(harmon == 1, eaf_exp, 1 - eaf_exp)
+    ) %>%
+    filter(!is.na(harmon)) %>%
+    select(-c(ea_exp, nea_exp, ea_exp_flip, nea_exp_flip, harmon, harmon1, harmon2,
+              rsid_proxy, ea_t2d, nea_t2d, ea_proxy, nea_proxy))
+head(protphewasres)
+```
+
+```{r}
+ctgwas_sig <- read_tsv("../data/ctgwas_sig.tsv", show_col_types = FALSE)
+head(ctgwas_sig)
+```
+
+```{r}
+ctgwas_sig <- ctgwas_sig %>%
+    group_by(trait) %>%
+    add_count(name = "nsnps") %>%
+    ungroup
+head(ctgwas_sig)
+```
+
+```{r}
+protphewas <- inner_join(ctgwas_sig, protphewasres, by = "rsid", relationship = "many-to-many")
+head(protphewas)
+```
+
+```{r}
+protphewas <- protphewas %>%
+    filter(abs(eaf_t2d - eaf_exp) < .2)
+head(protphewas)
+```
+
+```{r}
+protphewas <- protphewas %>%
+    group_by(trait, rsid, id_exp) %>%
+    arrange(desc(reference_snp), desc(eaf_exp), desc(beta_exp/se_exp), .by_group = TRUE) %>%
+    slice(1) %>%
+    ungroup %>%
+    select(-c(r2, reference_snp))
+head(protphewas)
+```
+
+```{r}
+protphewas <- protphewas %>%
+    group_by(trait, id_exp) %>%
+    add_count(name = "nsnps_exp") %>%
+    ungroup %>%
+    filter(nsnps == nsnps_exp) %>%
+    select(-c(nsnps, nsnps_exp))
+head(protphewas)
+```
+
+```{r}
+write_tsv(protphewas, "../data/protphewas.tsv")
+```
+
+```{r}
+protmeta <- protphewas %>%
+    group_by(trait, profile, id_exp, name_exp) %>%
+    nest
+print(protmeta)
+```
+
+```{r}
+protmeta <- protmeta %>%
+    mutate(
+        metares = map(
+            data,
+            ~tryCatch(
+                {
+                    PROFILEMETA <- meta::metagen(
+                        TE = beta_exp, seTE = se_exp, data = .x,
+                        fixed = FALSE, random = TRUE,
+                        method.tau = "PM", prediction = FALSE
+                    )
+                    with(
+                        PROFILEMETA,
+                        tibble(
+                            beta_meta = TE.random, se_meta = seTE.random, pval_meta = pval.random, 
+                            conf_low_meta = lower.random, conf_high_meta = upper.random,
+                            Qv = Q, Qdf = df.Q, Qp = pval.Q, Tau = tau
+                        )
+                    )
+                },
+                error = function(e){ tibble(NULL) }
+            )
+        )
+    )
+print(protmeta)
+```
+
+```{r}
+protmeta <- protmeta %>%
+    select(metares) %>%
+    unnest(metares) %>%
+    ungroup
+head(protmeta)
+```
+
+```{r}
+write_tsv(protmeta, "../data/protmeta.tsv")
+```
+

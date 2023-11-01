@@ -1,0 +1,239 @@
+---
+title: An R Markdown document converted from "07_PostProcess.ipynb"
+output: html_document
+---
+
+# Cross-trait GWAS post-processing
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(purrr)
+library(ggplot2)
+```
+
+## Cross-trait summary stats
+
+```{r}
+ct_dat <- read_tsv("../data/ct_dat.tsv", show_col_types = FALSE)
+head(ct_dat)
+```
+
+## Cross-trait GWAS results
+
+```{r}
+gwasres <- tibble(
+    trait = c("cad", "ckd", "stroke")
+) %>%
+    mutate(
+        trait_res = map(
+            trait,
+            ~read_table(
+                paste0("../data/ctgwas/pairwise/", .x, "/Results/C-GWAS.p"), 
+                skip = 1,
+                col_names = c("chrom", "pos", "pval_cgwas"),
+                col_types = "nn-n----"
+            )
+        )
+    )
+print(gwasres)
+```
+
+## Joining GWAS results
+
+```{r}
+gwasres <- gwasres %>%
+    mutate(
+        trait_res = map2(
+            trait, trait_res,
+            ~ct_dat %>%
+                select(chrom, pos, rsid,
+                       ends_with("t2d"),
+                       ends_with(.x)) %>%
+                inner_join(.y, by = join_by(chrom, pos))
+        )
+    )
+print(gwasres)
+```
+
+## Selecting significant signals
+
+```{r}
+singletrait_thresh <- sqrt(5e-8)
+signif(singletrait_thresh, 1)
+```
+
+```{r}
+qchisq(singletrait_thresh, df = 1, lower.tail = FALSE)
+```
+
+```{r}
+gwasres_sig <- gwasres %>%
+    mutate(
+        trait_res = map2(
+            trait, trait_res,
+            ~{
+                traitpvalcol <- paste("pval", .x, sep = "_")
+                filter(
+                    .y,
+                    pval_t2d <= singletrait_thresh,
+                    get(traitpvalcol) <= singletrait_thresh,
+                    pval_cgwas <= 5e-8
+                )
+            }
+        )
+    )
+print(gwasres_sig)
+```
+
+## Clumping
+
+```{r}
+gwasres_sig <- gwasres_sig %>%
+    mutate(
+        clumped = map(
+            trait_res,
+            ~{
+                fn <- tempfile()
+                .x %>%
+                    select(
+                        SNP = rsid, P = pval_cgwas
+                    ) %>%
+                    write_tsv(fn)
+                plink_cmd <- paste0(
+                    "~/bin/plink",
+                    " --bfile ", "~/projects/DVA/Data/ReferenceData/1kg_ref/EUR",
+                    " --clump ", fn, 
+                    " --clump-p1 ", 5e-8, 
+                    " --clump-r2 ", 0.01,
+                    " --clump-kb ", 250, 
+                    " --out ", fn
+                )
+                system(plink_cmd)
+                clumped_snps <- paste("awk '{print $3}'", paste(fn, "clumped", sep = "."))
+                clumped_snps <- readLines(pipe(clumped_snps))
+                clumped_snps <- clumped_snps[-1]
+                clumped_snps <- tibble(rsid = clumped_snps)
+                unlink(paste0(fn, "*"))
+                return(clumped_snps)
+            }
+        ),
+        clumped = map2(
+            trait_res, clumped,
+            inner_join,
+            by = "rsid"
+        )
+    )
+print(gwasres_sig)
+```
+
+## Significant signals found
+
+```{r}
+ctgwas_sig <- gwasres_sig %>%
+    transmute(
+        trait, 
+        clumped = map2(
+            clumped, trait,
+            ~rename_with(
+                .x,
+                function(COLNAME){
+                    gsub(.y, "trait", COLNAME)
+                },
+                ends_with(.y)
+            )
+        )
+    ) %>%
+    unnest(clumped)
+head(ctgwas_sig)
+```
+
+```{r}
+nrow(ctgwas_sig)
+```
+
+```{r}
+options(repr.plot.width = 12, repr.plot.height = 5)
+ctgwas_sig %>%
+    mutate(sign_trait = ifelse(beta_trait > 0, "orangered", "forestgreen")) %>%
+    ggplot(aes(beta_t2d, beta_trait)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "blue") +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "blue") +
+    geom_point(aes(color = sign_trait), alpha = .5) +
+    scale_color_identity(
+        labels = c("Discordant", "Concordant"),
+        guide = guide_legend(title = "Sign of trait association")
+    ) +
+    facet_wrap(~trait, nrow = 1) +
+    theme_bw() +
+    labs(x = "T2D Log OR", y = "Trait Log OR")
+```
+
+## Proportion of concordant and discordant signals in each pair
+
+```{r}
+ctgwas_sig <- ctgwas_sig %>%
+    mutate(profile = ifelse(beta_trait > 0, "Concordant", "Discordant"))
+count(ctgwas_sig, trait, profile)
+```
+
+## Nearest genes of hits found
+
+```{r}
+gencode <- rtracklayer::readGFF("~/projects/DVA/Data/ReferenceData/gencode.v19.annotation.gtf")
+head(gencode)
+```
+
+```{r}
+ctgwas_sig <- gencode %>%
+    filter(type == "gene") %>%
+    transmute(chrom = as.numeric(gsub("chr", "", seqid)),
+              start, end, gene_name) %>%
+    drop_na %>%
+    inner_join(ctgwas_sig, by = "chrom", relationship = "many-to-many") %>%
+    mutate(distance = ifelse(pos >= start & pos <= end, 0, 
+                             pmin(abs(pos - start), abs(pos - end)))) %>%
+    group_by(rsid) %>%
+    slice_min(distance, with_ties = FALSE) %>%
+    rename(nearest_gene = gene_name) %>%
+    ungroup %>%
+    select(
+        trait, profile,
+        chrom, pos, rsid,
+        ends_with("t2d"),
+        ends_with("trait"),
+        pval_cgwas,
+        nearest_gene
+    ) %>%
+    arrange(trait, profile, chrom, pos)
+head(ctgwas_sig)
+```
+
+```{r}
+nrow(ctgwas_sig)
+```
+
+## Table of SNPs found
+
+```{r}
+ctgwas_sig %>%
+    mutate(
+        across(
+            c(eaf_t2d, beta_t2d, se_t2d, pval_t2d,
+              eaf_trait, beta_trait, se_trait, pval_trait,
+              pval_cgwas),
+            ~signif(.x, digits = 2)
+        )
+    ) %>%
+    kableExtra::kbl() %>%
+    as.character %>%
+    IRdisplay::display_html()
+```
+
+## Saving
+
+```{r}
+write_tsv(ctgwas_sig, "../data/ctgwas_sig.tsv")
+```
+

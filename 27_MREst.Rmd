@@ -1,0 +1,286 @@
+---
+title: An R Markdown document converted from "27_MREst.ipynb"
+output: html_document
+---
+
+# Instrumental analysis
+
+## Libraries
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(purrr)
+library(ggplot2)
+```
+
+```{r}
+options(repr.plot.res = 300)
+```
+
+## Results from cross-trait GWAS
+
+Cross-trait data:
+
+```{r}
+mrctgwastab <- tibble(
+    ctdat = list.files("../data/mr_traits/cleaned", full.names = TRUE),
+) %>%
+    transmute(
+        exposure = gsub("\\.tsv", "", basename(ctdat)),
+        ctdat = map(
+            ctdat, read_tsv,
+            skip = 1,
+            col_names = c(
+                "chrom", "pos", "rsid", "ea_t2d", "nea_t2d", 
+                paste(c("eaf", "beta", "se", "pval"), "t2d", sep = "_"),
+                paste(c("eaf", "beta", "se", "pval"), "cad", sep = "_"),
+                paste(c("eaf", "beta", "se", "pval"), "exp", sep = "_")
+            ),
+            col_types = "nncccnnnnnnnnnnnn"
+        )
+    )
+print(mrctgwastab)
+```
+
+Cross-trait GWAS results:
+
+```{r}
+mrctgwastab <- mrctgwastab %>%
+    mutate(
+        exp_res = map(
+            exposure,
+            ~read_table(
+                paste0("../data/mr_traits/ctg/", .x, "/Results/C-GWAS.p"), 
+                skip = 1,
+                col_names = c("chrom", "pos", "pval_cgwas"),
+                col_types = "nn-n----"
+            )
+        )
+    )
+print(mrctgwastab)
+```
+
+Joining:
+
+```{r}
+mrctgwastab <- mrctgwastab %>%
+    mutate(
+        ctdat = map2(
+            ctdat, exp_res,
+            inner_join,
+            by = c("chrom", "pos")
+        )
+    ) %>%
+    select(-exp_res)
+print(mrctgwastab)
+```
+
+## Significant instruments
+
+```{r}
+singletrait_thresh <- sqrt(5e-8)
+signif(singletrait_thresh, 1)
+```
+
+```{r}
+mrctgwas_sig <- mrctgwastab %>%
+    mutate(
+        ctdat = map(
+            ctdat,
+            filter,
+            pval_cgwas <= 5e-8,
+            pval_t2d <= singletrait_thresh,
+            pval_exp <= singletrait_thresh
+        )
+    )
+print(mrctgwas_sig)
+```
+
+## Clumping
+
+```{r}
+mrctgwas_sigcl <- mrctgwas_sig %>%
+    mutate(
+        clumped = map(
+            ctdat,
+            ~{
+                fn <- tempfile()
+                .x %>%
+                    select(
+                        SNP = rsid, P = pval_cgwas
+                    ) %>%
+                    write_tsv(fn)
+                plink_cmd <- paste0(
+                    "~/bin/plink",
+                    " --bfile ", "~/projects/DVA/Data/ReferenceData/1kg_ref/EUR",
+                    " --clump ", fn, 
+                    " --clump-p1 ", 5e-8, 
+                    " --clump-r2 ", 0.01,
+                    " --clump-kb ", 250, 
+                    " --out ", fn
+                )
+                system(plink_cmd)
+                clumped_snps <- paste("awk '{print $3}'", paste(fn, "clumped", sep = "."))
+                clumped_snps <- readLines(pipe(clumped_snps))
+                clumped_snps <- clumped_snps[-1]
+                clumped_snps <- tibble(rsid = clumped_snps)
+                unlink(paste0(fn, "*"))
+                return(clumped_snps)
+            }
+        ),
+        clumped = map2(
+            ctdat, clumped,
+            inner_join,
+            by = "rsid"
+        )
+    )
+print(mrctgwas_sigcl)
+```
+
+## Classification acording to sign of exposure
+
+```{r}
+mrctgwas_prof <- mrctgwas_sigcl %>%
+    transmute(
+        exposure,
+        clumped = map(
+            clumped,
+            mutate,
+            sign_exp = case_when(
+                beta_exp > 0 ~ "Positive",
+                beta_exp < 0 ~ "Negative"
+            )
+        ),
+        clumped = map(clumped, nest, data = -sign_exp)
+    ) %>%
+    unnest(clumped)
+print(mrctgwas_prof)
+```
+
+## Effect of each profile on T2D
+
+```{r}
+mrctgwas_meta <- mrctgwas_prof %>%
+    transmute(
+        exposure, sign_exp,
+        metares = map(
+            data,
+            ~if(nrow(.x) > 1){
+                PROFILEMETA <- meta::metagen(
+                    TE = beta_cad, seTE = se_cad, data = .x,
+                    fixed = FALSE, random = TRUE,
+                    method.tau = "PM", prediction = FALSE
+                )
+                with(
+                    PROFILEMETA,
+                    tibble(
+                        beta_meta = TE.random, se_meta = seTE.random, pval_meta = pval.random, 
+                        conf_low_meta = lower.random, conf_high_meta = upper.random,
+                        Qv = Q, Qdf = df.Q, Qp = pval.Q, Tau = tau
+                    )
+                )
+            } else {
+                transmute(
+                    .x,
+                    beta_meta = beta_cad, se_meta = se_cad, pval_meta = pval_cad,
+                    conf_low_meta = beta_cad - (qnorm(1 - .05/2) * se_cad),
+                    conf_high_meta = beta_cad + (qnorm(1 - .05/2) * se_cad),
+                    Qv = NaN, Qdf = NaN, Qp = NaN, Tau = NaN
+                )
+            }
+        )
+    ) %>%
+    unnest(metares)
+head(mrctgwas_meta)
+```
+
+## Testing for difference between profiles
+
+```{r}
+mrctgwas_comp <- mrctgwas_meta %>%
+    nest(data = -exposure)
+print(mrctgwas_comp)
+```
+
+```{r}
+mrctgwas_comp <- mrctgwas_comp %>%
+    mutate(
+        beta_comp = map_dbl(data, ~abs(diff(.x$beta_meta))),
+        se_comp = map_dbl(data, ~sqrt(sum(.x$se_meta^2))),
+        pval_comp = 2 * pnorm(-abs(beta_comp / se_comp))
+    ) %>%
+    unnest(data)
+head(mrctgwas_comp)
+```
+
+## Significant differences
+
+```{r}
+mrctgwas_compsig <- mrctgwas_comp %>%
+    filter(p.adjust(pval_comp, "fdr") < 0.05)
+head(mrctgwas_compsig)
+```
+
+## Saving
+
+```{r}
+write_tsv(mrctgwas_compsig, "../data/mrctgwas_compsig.tsv")
+```
+
+## Visualizing result
+
+```{r}
+mrctgwas_compsig$exposure %>% unique
+```
+
+```{r}
+options(repr.plot.height = 4.5, repr.plot.width = 4)
+mrctgwas_compsig %>%
+    mutate(
+        across(c(beta_meta, conf_low_meta, conf_high_meta), ~exp(.x)),
+        exposure = case_match(
+            exposure,
+            "FreeCholSmallVLDL" ~ "Free cholesterol\nin small VLDL",
+            "ApoBtoApoA1" ~ "ApoB to ApoA1\nratio",
+            "PLinSmallVLDL" ~ "Phospholipids\nin small VLDL",
+            "TGinLDL" ~ "Triglycerides\nin LDL",
+            "ConcSmallVLDL" ~ "Concentration\nof small VLDL",
+            "GlycoproteinAcetyls" ~ "Glycoprotein\nacetyls",
+            "PLinLargeHDL" ~ "Phospholipids\nin large HDL",
+            "ConcLargeHDL" ~ "Concentration\nof large HDL",
+            "FreeCholLargeHDL" ~ "Free cholesterol\nin large HDL",
+            "Afib" ~ "Atrial\nfibrilation",
+            "HDL" ~ "HDL",
+            "LDL" ~ "LDL",
+            "SBP" ~ "SBP",
+            "TG" ~ "TG"
+        )
+    ) %>%
+    ggplot(aes(beta_meta, reorder(exposure, beta_comp))) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(group = sign_exp, 
+                       xmin = conf_low_meta, xmax = conf_high_meta),
+                   position = position_dodge(width = .5)) +
+    geom_point(aes(group = sign_exp, fill = sign_exp, shape = sign_exp),
+               position = position_dodge(width = .5)) +
+    scale_fill_manual(
+        values = c("orange", "magenta")
+    ) +
+    scale_shape_manual(
+        values = c(25, 24)
+    ) +
+    theme_bw() +
+    labs(x = "CAD OR per allele\n(95% CI)", y = "Exposure", 
+         fill = "Sign of\nexposure", shape = "Sign of\nexposure") +
+    theme(
+        legend.position = "top",
+        legend.title = element_text(size = 8),
+        legend.text = element_text(size = 7),
+        axis.text = element_text(size = 6),
+        axis.title = element_text(size = 8),
+        axis.ticks = element_line(size = .25)
+    )
+```
+

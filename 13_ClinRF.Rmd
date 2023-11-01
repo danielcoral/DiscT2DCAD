@@ -1,0 +1,100 @@
+---
+title: An R Markdown document converted from "13_ClinRF.ipynb"
+output: html_document
+---
+
+# Random forest - Clinical phenotypes
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+```
+
+```{r}
+clinphewas <- read_tsv("../data/clinphewas.tsv", show_col_types = FALSE)
+head(clinphewas)
+```
+
+```{r}
+library(ggplot2)
+```
+
+```{r}
+options(repr.plot.height = 10)
+filter(clinphewas, name_exp == "Monocyte percentage") %>%
+    ggplot(aes(beta_exp, rsid)) +
+    geom_linerange(aes(xmin = beta_exp - qnorm(1 - .05/2)*se_exp,
+                       xmax = beta_exp + qnorm(1 - .05/2)*se_exp)) +
+    geom_point() +
+    facet_grid(profile~., scales = "free", space = "free")
+```
+
+```{r}
+clinmeta <- read_tsv("../data/clinmeta.tsv", show_col_types = FALSE)
+head(clinmeta)
+```
+
+```{r}
+clincompsig <- read_tsv("../data/clincompsig.tsv", show_col_types = FALSE)
+head(clincompsig)
+```
+
+```{r}
+clinmat_long <- clincompsig %>%
+    inner_join(clinphewas) %>%
+    transmute(trait, id_exp, profile, 
+              rsid, zsc_exp = beta_exp / se_exp)
+head(clinmat_long)
+```
+
+```{r}
+clinmat_wide <- clinmat_long %>%
+    pivot_wider(names_from = id_exp, values_from = zsc_exp) %>%
+    arrange(trait, profile)
+head(clinmat_wide)
+```
+
+```{r}
+borutares <- Boruta::Boruta(
+    x = select(clinmat_wide, -c(trait, profile, rsid)), 
+    y = factor(clinmat_wide$profile),
+    maxRuns = 1000
+)
+```
+
+```{r}
+clinimpdf <- Boruta::attStats(borutares)
+head(clinimpdf)
+```
+
+```{r}
+clinimpdf <- clinimpdf %>%
+    filter(decision == "Confirmed") %>%
+    tibble::rownames_to_column("id_exp") %>%
+    inner_join(clincompsig) %>%
+    inner_join(clinmeta)
+head(clinimpdf)
+```
+
+```{r}
+clinimpdf %>%
+    arrange(pval_comp) %>%
+    pull(name_exp) %>%
+    unique %>%
+    print
+```
+
+```{r}
+write_tsv(clinimpdf, "../data/clinimpdf.tsv")
+```
+
+```{r}
+clindiff <- inner_join(clinimpdf, clinphewas)
+head(clindiff)
+```
+
+```{r}
+write_tsv(clindiff, "../data/clindiff.tsv")
+```
+

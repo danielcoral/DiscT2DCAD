@@ -1,0 +1,549 @@
+---
+title: An R Markdown document converted from "40_PRSORIGIN.ipynb"
+output: html_document
+---
+
+# PRS associations in ORIGIN
+
+---
+
+Author: Daniel Coral
+
+Email: daniel.coral@med.lu.se
+
+---
+
+This notebook shows the analyses we have run in UK Biobank and what we expect to replicate in ORIGIN. 
+
+The analyses were done in the following version of R:
+
+```{r}
+R.version[c("major", "minor")]
+```
+
+The libraries that we used:
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(purrr)
+library(survival)
+```
+
+The objectives are:
+
+1. To measure the association of concordant and discordant PRSs to MACE.
+2. To measure how much predictive information is added by the PRSs.
+3. To assess whether the treatment effect varies by the level of PRSs.
+
+We have generated files with the sum of alleles of each score in ORIGIN, which look like this:
+
+```{r}
+prsdat <- read_tsv("../data/prsdat.tsv", show_col_types = FALSE)
+```
+
+```{r}
+head(prsdat)
+```
+
+...where `eid` is the sample ID and each column is the sum of alleles of each PRS.
+
+We have in UK Biobank a table of personal history of diseases at baseline, which looks like this:
+
+```{r}
+dxmed <- read_tsv("../data/dxmed.tsv", show_col_types = FALSE)
+head(dxmed)
+```
+
+To guide the analysis we expect to be run in ORIGIN, we will assume that the column `Insulin` represents the treatment arms in ORIGIN.
+
+We need also covariates such as age, sex, the first 10 principal components, and the biomarkers that are used for risk stratification, which are in the following table:
+
+```{r}
+recoded_dat <- read_tsv("../data/recoded_dat.tsv", show_col_types = FALSE)
+head(recoded_dat)
+```
+
+With all this in place we can produce a table with all the data necessary to run the analysis:
+
+```{r}
+joindat <- reduce(list(recoded_dat, dxmed, prsdat), inner_join, by = "eid")
+head(joindat)
+```
+
+We can now answer the first part of the first question: 
+
+> Are the scores associated with MACE?
+
+With this data, of course, we can only check if a cross-sectional association exists. To do that, we first define history of MACE as history of either coronary heart disease (CHD) or stroke:
+
+```{r}
+joindat <- mutate(joindat, MACE = 1 * (CHD == 1 | Stroke == 1))
+```
+
+Then running the regression:
+
+```{r}
+crudeassocbaseline <- glm(
+    reformulate(
+        response = "MACE",
+        termlabels = c("Concordant", "Discordant", "age", "sex", paste0("gpc", 1:10))
+    ),
+    data = joindat,
+    family = binomial
+) %>%
+    broom::tidy()
+head(crudeassocbaseline)
+```
+
+We also observed in UK Biobank differences by sex, so we are interested in sex-stratified estimates. To do that:
+
+```{r}
+crudeassocbaselinebysex <- joindat %>%
+    nest(Data = -sex) %>%
+    mutate(
+        Mod = map(
+            Data,
+            ~glm(
+                reformulate(
+                    response = "MACE",
+                    termlabels = c("Concordant", "Discordant", "age", paste0("gpc", 1:10))
+                ),
+                data = .x,
+                family = binomial
+            ) %>%
+            broom::tidy()
+        ),
+        Data = NULL
+    ) %>%
+    unnest(Mod)
+head(crudeassocbaselinebysex)
+```
+
+Finally, to check if the effect is the same in both treatment arms:
+
+```{r}
+crudeassocbaselinebyarm <- joindat %>%
+    nest(Data = -Insulin) %>%
+    mutate(
+        Mod = map(
+            Data,
+            ~glm(
+                reformulate(
+                    response = "MACE",
+                    termlabels = c("Concordant", "Discordant", "age", "sex", paste0("gpc", 1:10))
+                ),
+                data = .x,
+                family = binomial
+            ) %>%
+            broom::tidy()
+        ),
+        Data = NULL
+    ) %>%
+    unnest(Mod)
+head(crudeassocbaselinebyarm)
+```
+
+These tables will be useful to examine if the cross-sectional associations seen in UK Biobank are also seen at baseline in ORIGIN.
+
+The most interesting part is of course the association of the PRSs to time to MACE, and if the PRSs modify the effect of the treatment arm. To answer these questions we need time to MACE data, which in UK Biobank look like this:
+
+```{r}
+survmacedat <- rio::import("../data/survmacedat.RData") %>%
+    filter(outcome == "MACE") %>%
+    unnest(data) %>%
+    select(-outcome)
+head(survmacedat)
+```
+
+In this table `outcome_value` represents whether the individual experienced the outcome or the outcome was censored (1 or 0, respectively) and `outcome_timeyrs` is the time of follow-up.
+
+We can then add this data to the table we already have:
+
+```{r}
+survdf <- inner_join(survmacedat, joindat, by = "eid")
+head(survdf)
+```
+
+In UK Biobank we measured the risk in individuals who didn't have history of MACE at baseline, so that we have an idea of the value of PRSs in primary prevention. We know that in ORIGIN participants had high CVD risk at baseline, meaning that some of them had already history of MACE. We will therefore adjust for prior history of MACE instead of excluding participants from the analysis.
+
+Additionally, to both adjust and assess the added value of the PRSs on top of traditional risk factors, we fit a model that included all the predictors of SCORE2-Diabetes, a model that has been validated in multiple cohorts in Europe and is endorsed by the European Society of Cardiology. Here we show how we calculated this model, including all the predictors of our model:
+
+```{r}
+dxmed %>% names
+```
+
+```{r}
+score2dat <- survdf %>%
+    transmute(
+        outcome_value, outcome_timeyrs, 
+        Concordant, Discordant,
+        age = (age - 60)/5, sex,
+        smoking,
+        sbp = (sbp - 120)/20,
+        t2d = T2D,
+        tchol = tchol - 6,
+        hdl = (hdl - 1.3)/0.5,
+        age_smoking = age*smoking,
+        age_sbp = age*sbp,
+        age_t2d = age*t2d,
+        age_tchol = age*tchol,
+        age_hdl = age*hdl,
+        t2donsetage = ifelse(t2d == 1, (T2Dage - 50)/5, 0),
+        hba1c = (hba1c - 31)/9.34,
+        lnegfr = log(egfr),
+        lnegfr = (lnegfr - 4.5)/0.15,
+        lnegfrsq = lnegfr^2,
+        age_hba1c = age*hba1c,
+        age_lnegfr = age*lnegfr,
+        MACE, CKD, PAD, T1D, HT, NeuroDM, RetinDM, 
+        Insulin, AntiDM, AntiHT, LipidLower,
+        across(all_of(paste0("gpc", 1:10)))
+    )
+head(score2dat)
+```
+
+As was done in the cross-sectional setting, we can start by assessing the association of PRSs to time to MACE in a minimally adjusted survival model:
+
+```{r}
+crudeassocsurv <- coxph(
+    reformulate(
+        response = "Surv(time = outcome_timeyrs, event = outcome_value)",
+        termlabels = c("Concordant", "Discordant", "age", "sex", paste0("gpc", 1:10))
+    ),
+    data = score2dat,
+) %>%
+    broom::tidy()
+head(crudeassocsurv)
+```
+
+We can do the same stratified by sex:
+
+```{r}
+crudeassocsurvbysex <- score2dat %>%
+    nest(Data = -sex) %>%
+    mutate(
+        Mod = map(
+            Data,
+            ~coxph(
+                reformulate(
+                    response = "Surv(time = outcome_timeyrs, event = outcome_value)",
+                    termlabels = c("Concordant", "Discordant", "age", paste0("gpc", 1:10))
+                ),
+                data = .x
+            ) %>%
+            broom::tidy()
+        ),
+        Data = NULL
+    ) %>%
+    unnest(Mod)
+head(crudeassocsurvbysex)
+```
+
+...and by treatment arm:
+
+```{r}
+crudeassocsurvbyarm <- score2dat %>%
+    nest(Data = -Insulin) %>%
+    mutate(
+        Mod = map(
+            Data,
+            ~coxph(
+                reformulate(
+                    response = "Surv(time = outcome_timeyrs, event = outcome_value)",
+                    termlabels = c("Concordant", "Discordant", "age", "sex", paste0("gpc", 1:10))
+                ),
+                data = .x
+            ) %>%
+            broom::tidy()
+        ),
+        Data = NULL
+    ) %>%
+    unnest(Mod)
+head(crudeassocsurvbyarm)
+```
+
+Now, to answer the question of whether the PRSs add valuable information for prediction, we can fit two competing nested models, one with all predictors except the PRS, and another one with the PRS:
+
+```{r}
+adjassocsurvmods <- list(
+    mod_withprs = coxph(
+        Surv(time = outcome_timeyrs, event = outcome_value) ~ ., 
+        data = score2dat
+    ),
+    mod_noprs = coxph(
+        Surv(time = outcome_timeyrs, event = outcome_value) ~ . - Concordant - Discordant, 
+        data = score2dat
+    )
+)
+```
+
+To extract the estimates from these models:
+
+```{r}
+adjassocsurvcoefs <- adjassocsurvmods %>%
+    map(broom::tidy) %>%
+    bind_rows(.id = "model")
+head(adjassocsurvcoefs)
+```
+
+We will then extract likelihoods from these models, which we'll use to calculate likelihood ratio tests to compare the fit of the two models:
+
+```{r}
+adjassocsurvlik <- adjassocsurvmods %>%
+    map(
+        ~tibble(
+            LR = summary(.x)$logtest["test"],
+            LL = as.numeric(logLik(.x)),
+            NV = sum(!is.na(coef(.x)))
+        )
+    ) %>%
+    bind_rows(.id = "model")
+adjassocsurvlik
+```
+
+We can also extract the c-statistic of these models, which can also be used to compare them:
+
+```{r}
+adjassocsurvCdat <- concordance(
+    adjassocsurvmods[["mod_withprs"]], 
+    adjassocsurvmods[["mod_noprs"]]
+)
+adjassocsurvCdat
+```
+
+We observed in UK Biobank that the fraction of added information provided by the PRSs increased significantly in individuals with higher risk. To seek replication of this finding in ORIGIN, we can take the probabilities calculated by the baseline model, and assess whether the fraction of added information increases as we move up in the scale of risk.
+
+First we need to add the predicted probabilities by the baseline model, and then we'll calculate log likelihoods at different thresholds:
+
+```{r}
+score2dat$PredRisk <- 1 - predict(adjassocsurvmods[["mod_noprs"]], score2dat, type = "survival")
+adjassocsurvlikbythresh <- map(
+    seq(0, .3, .025),
+    function(thresh){
+        Data <- filter(score2dat, PredRisk >= thresh)
+        map(
+            adjassocsurvmods,
+            function(MOD){
+                FRML <- formula(MOD)
+                COEF <- coef(MOD)
+                MODRES <- coxph(FRML, data = Data, init = COEF, control = coxph.control(iter.max = 0))
+                MOD0 <- coxph(Surv(time = outcome_timeyrs, event = outcome_value) ~ 1, data = Data)
+                tibble(
+                    L0 = as.numeric(logLik(MOD0)),
+                    LL = as.numeric(logLik(MODRES)),
+                    NV = sum(!is.na(COEF))
+                )
+            }
+        ) %>%
+        bind_rows(.id = "model") %>%
+        mutate(probthresh = thresh)
+    }
+) %>%
+    bind_rows
+score2dat$PredRisk <- NULL
+head(adjassocsurvlikbythresh)
+```
+
+Here L0 is the log-likelihood of the null model, which we use to calculate the fraction of added information.
+
+Next, we want to assess whether the PRSs modify the effect of the treatment arm on MACE. To do that we add an interaction term to the model with PRSs we fitted previously:
+
+```{r}
+interactmod <- update(adjassocsurvmods[["mod_withprs"]], . ~ . + Concordant:Insulin + Discordant:Insulin)
+```
+
+And then extracting the coefficients from this model:
+
+```{r}
+interactmodcoefs <- broom::tidy(interactmod)
+head(interactmodcoefs)
+```
+
+---
+
+Given the difference between sexes we observed in UK Biobank, we would like to see also how the adjusted models perform within each sex. To that end, we will repeat all the steps for the adjusted analysis by each sex:
+
+- Fitting the models:
+
+```{r}
+adjassocsurvmodsbysex <- tibble(
+    sex = c("Female", "Male")
+) %>%
+    mutate(
+        Data = map(sex, ~filter(score2dat, sex == .x)),
+        Data = map(Data, select, -sex),
+        mod_withprs = map(
+            Data,
+            ~coxph(
+                Surv(time = outcome_timeyrs, event = outcome_value) ~ ., 
+                data = .x
+            )
+        ),
+        mod_noprs = map(
+            Data,
+            ~coxph(
+                Surv(time = outcome_timeyrs, event = outcome_value) ~ . - Concordant - Discordant, 
+                data = .x
+            )
+        )
+    )
+print(adjassocsurvmodsbysex)
+```
+
+- Extracting coefficients:
+
+```{r}
+adjassocsurvcoefscoefsbysex <- adjassocsurvmodsbysex %>%
+    pivot_longer(
+        starts_with("mod"),
+        names_to = c(".value", "modname"),
+        names_sep = "_"
+    ) %>%
+    transmute(
+        sex,
+        modname,
+        mod = map(mod, broom::tidy)
+    ) %>%
+    unnest(mod)
+head(adjassocsurvcoefscoefsbysex)
+```
+
+- Calculating log-likelihoods:
+
+```{r}
+adjassocsurvlikbysex <- adjassocsurvmodsbysex %>%
+    pivot_longer(
+        starts_with("mod"),
+        names_to = c(".value", "modname"),
+        names_sep = "_"
+    ) %>%
+    transmute(
+        sex, modname,
+        mod = map(
+            mod,
+            ~tibble(
+                LR = summary(.x)$logtest["test"],
+                LL = as.numeric(logLik(.x)),
+                NV = sum(!is.na(coef(.x)))
+            )
+        )
+    ) %>%
+    unnest(mod)
+adjassocsurvlikbysex
+```
+
+- Calculating C-statistics:
+
+```{r}
+adjassocsurvCdatbysex <- adjassocsurvmodsbysex %>%
+    transmute(
+        sex, 
+        Cdat = map2(mod_withprs, mod_noprs, concordance)
+    )
+print(adjassocsurvCdatbysex)
+```
+
+- Calculating predicted risk and deriving log-likelihoods at different thresholds of predicted risk:
+
+```{r}
+adjassocsurvlikbythreshbysex <- adjassocsurvmodsbysex %>%
+    mutate(
+        Data = map2(
+            Data, mod_noprs,
+            ~mutate(.x, PredRisk = 1 - predict(.y, .x, type = "survival"))
+        )
+    ) %>%
+    expand_grid(
+        thresh = seq(0, .3, .025)
+    ) %>%
+    transmute(
+        sex, thresh,
+        across(
+            starts_with("mod"),
+            function(MODLIST){
+                pmap(
+                    list(Data, thresh, MODLIST),
+                    function(DAT, THRESH, MOD){
+                        DAT <- filter(DAT, PredRisk >= THRESH)
+                        FRML <- formula(MOD)
+                        COEF <- coef(MOD)
+                        MODRES <- coxph(FRML, data = DAT, init = COEF, control = coxph.control(iter.max = 0))
+                        MOD0 <- coxph(Surv(time = outcome_timeyrs, event = outcome_value) ~ 1, data = DAT)
+                        tibble(
+                            L0 = as.numeric(logLik(MOD0)),
+                            LL = as.numeric(logLik(MODRES)),
+                            NV = sum(!is.na(COEF))
+                        )
+                    }
+                )
+            }
+        )
+    ) %>%
+    pivot_longer(
+        starts_with("mod"),
+        names_to = c(".value", "modname"),
+        names_sep = "_"
+    ) %>%
+    unnest(mod)
+head(adjassocsurvlikbythreshbysex)
+```
+
+- Fitting interaction models with treatment:
+
+```{r}
+interactmodbysex <- adjassocsurvmodsbysex %>%
+    transmute(
+        sex, mod = map2(
+            mod_withprs, Data,
+            function(MOD, DAT){
+                update(MOD, ~ . + Concordant:Insulin + Discordant:Insulin, data = DAT)
+            }
+        )
+    )
+print(interactmodbysex)
+```
+
+```{r}
+interactmodcoefsbysex <- interactmodbysex %>%
+    mutate(mod = map(mod, broom::tidy)) %>%
+    unnest(mod)
+head(interactmodcoefsbysex)
+```
+
+---
+
+Once we have all these calculations, we will ask you to put them all in a single file that can be shared, as no individual level data is included:
+
+```{r}
+resultfile <- list(
+    CrudeAssocBaseline = crudeassocbaseline,
+    CrudeAssocBaselineBySex = crudeassocbaselinebysex,
+    CrudeAssocBaselineByArm = crudeassocbaselinebyarm,
+    CrudeAssocSurv = crudeassocsurv,
+    CrudeAssocSurvBySex = crudeassocsurvbysex,
+    CrudeAssocSurvByArm = crudeassocsurvbyarm,
+    AdjAssocSurvCoefs = adjassocsurvcoefs,
+    AdjAssocSurvLik = adjassocsurvlik,
+    AdjAssocSurvCdat = adjassocsurvCdat,
+    AdjAssocSurvLikByThresh = adjassocsurvlikbythresh,
+    InteractModCoefs = interactmodcoefsbysex
+    AdjAssocSurvCoefsBySex = adjassocsurvcoefscoefsbysex,
+    AdjAssocSurvLikBySex = adjassocsurvlikbysex,
+    AdjAssocSurvCdatBySex = adjassocsurvCdatbysex,
+    AdjAssocSurvLikByThreshBySex = adjassocsurvlikbythreshbysex,
+    InteractModCoefsBySex = interactmodcoefsbysex
+)
+```
+
+Saving this file:
+
+```{r}
+save(resultfile, "resultfile.RData")
+```
+
+And then this file could be shared by email.
+
+***Many thanks for the help!***
+

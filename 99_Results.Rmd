@@ -1,0 +1,802 @@
+---
+title: An R Markdown document converted from "99_Results.ipynb"
+output: html_document
+---
+
+# Results
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(purrr)
+library(ggplot2)
+```
+
+```{r}
+options(repr.plot.res = 300)
+```
+
+## Significant cross-trait GWAS identified
+
+Criteria:
+
+- Significant for both traits at a p-value of the square root of genome-wide threshold: 2e-04.
+
+- Genome-wide significant in the cross-trait analysis.
+
+```{r}
+ctgwas_sig <- read_tsv("../data/ctgwas_sig.tsv", show_col_types = FALSE)
+head(ctgwas_sig)
+```
+
+```{r}
+nrow(ctgwas_sig)
+```
+
+```{r}
+count(ctgwas_sig, trait)
+```
+
+```{r}
+count(ctgwas_sig, profile)
+```
+
+```{r}
+count(ctgwas_sig, trait, profile)
+```
+
+```{r}
+options(repr.plot.width = 7, repr.plot.height = 3)
+ctgwas_sig %>%
+    mutate(
+        outcome = recode_factor(trait, cad = "CAD", stroke = "AIS", ckd = "CKD"),
+        sign_trait = beta_trait < 0
+    ) %>%
+    ggplot(aes(beta_t2d, beta_trait)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "blue") +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "blue") +
+    geom_point(aes(color = sign_trait), alpha = .5) +
+    scale_color_manual(
+        labels = c("Concordant", "Discordant"),
+        values = c("orangered", "forestgreen"),
+        guide = guide_legend(title = "Sign of outcome\nassociation")
+    ) +
+    facet_wrap(~outcome, nrow = 1) +
+    theme_bw() +
+    labs(x = "T2D Log OR", y = "Outcome Log OR")
+```
+
+```{r}
+options(repr.plot.width = 9, repr.plot.height = 7)
+ctgwas_sig %>%
+    filter(trait == "cad") %>%
+    mutate(
+        sign_trait = ifelse(beta_trait > 0, "orangered", "forestgreen"),
+        label = ifelse(
+            ((beta_trait > 0 & (beta_t2d > 0.15 | beta_trait > 0.1)) |
+             (beta_trait < 0 & (beta_t2d > 0.1 | beta_trait < -0.05))),
+            paste0(rsid, "\n(", nearest_gene, ")"),
+            NA
+        )
+    ) %>%
+    ggplot(aes(beta_t2d, beta_trait)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "blue") +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "blue") +
+    geom_point(aes(color = sign_trait), alpha = .5) +
+    ggrepel::geom_text_repel(aes(label = label), box.padding = 1.5, min.segment.length = 0) +
+    scale_color_identity(
+        labels = c("Discordant", "Concordant"),
+        guide = guide_legend(title = "Sign of trait association")
+    ) +
+    theme_bw() +
+    labs(x = "T2D Log OR", y = "CAD Log OR")
+```
+
+## Significant differences found in clinical phenotypes
+
+```{r}
+clinimpdf <- read_tsv( "../data/clinimpdf.tsv", show_col_types = FALSE)
+head(clinimpdf)
+```
+
+```{r}
+clinimpdf %>%
+    filter(grepl("dorsopathies", name_exp, ignore.case = TRUE))
+```
+
+```{r}
+options(repr.plot.width = 6.5, repr.plot.height = 3)
+g1 <- clinimpdf %>%
+    group_by(id_exp) %>%
+    filter(all(abs(beta_comp) > 0.001)) %>%
+    ungroup %>%
+    mutate(
+        name_exp = recode_factor(
+            name_exp,
+            "Breastfed as a baby" = "Breastfed as a baby",
+            "Health satisfaction" = "Health satisfaction",
+            "Dorsopathies" = "Dorsopathies",
+            "Father's age at death" = "Father's age at death",
+            "Frailty index" = "Frailty index",
+            "Monocyte percentage" = "Monocyte percentage",
+            "Diabetic hypoglycemia" = "Diabetic\nhypoglycaemia",
+            "Other arrhytmias" = "Cardiac arrythmias",
+            "Mixed hyperlipidaemia" = "Hyperlipidaemia",
+            "Atherosclerosis, excluding cerebral, coronary and PAD" = "Other atherosclerosis\n(No CAD, ASI and PAD)",
+            "STROKE" = "Any stroke",
+            "Peripheral atherosclerosis" = "PAD",
+            .default = "REMOVE"
+        )
+    ) %>%
+    filter(name_exp != "REMOVE", id_exp != "ukb-d-I9_PAD") %>%
+    mutate(
+        grp = case_when(
+            name_exp %in% c(
+                "PAD", "Other atherosclerosis\n(No CAD, ASI and PAD)", 
+                "Any stroke", "Hyperlipidaemia",
+                "Cardiac arrythmias", "Diabetic\nhypoglycaemia"
+            ) ~ "g1",
+            .default = "g2"
+        )
+    ) %>%
+    ggplot(aes(beta_meta, reorder(name_exp, beta_comp))) +
+    geom_vline(xintercept = 0, lty = "dashed") +
+    geom_linerange(aes(xmin = conf_low_meta, xmax = conf_high_meta,
+                       group = profile),
+                   position = position_dodge(width = .5)) +
+    geom_point(aes(color = profile, group = profile),
+               position = position_dodge(width = .5)) +
+    facet_wrap(~grp, scales = "free") +
+    labs(x = "SD units/LogOR per allele\n95% CI", y = NULL, color = "Profile") +
+    theme_bw() +
+    theme(legend.position = "top", strip.background = element_blank(), strip.text = element_blank())
+g1
+```
+
+## Adding established risk factors
+
+```{r}
+clinmeta <- read_tsv("../data/clinmeta.tsv", show_col_types = FALSE)
+head(clinmeta)
+```
+
+```{r}
+establishedrf <- tribble(
+    ~Name, ~id_exp,
+    "HbA1c", "ukb-d-30750_irnt",
+    "FastingGlucose", "ebi-a-GCST90002232",
+    "Triglycerides", "ukb-d-30870_irnt",
+    "SBP", "ukb-b-20175",
+    "HDL", "ukb-d-30760_irnt",
+    "LDL", "ukb-d-30780_irnt",
+    "BMI", "ukb-b-19953",
+    "WHR", "ieu-a-73", 
+    "FastingInsulin", "ebi-a-GCST90002238",
+    "CRP", "ukb-d-30710_irnt",
+    "IL-6", "ebi-a-GCST90012005",
+    "Never smoked", "ukb-d-20116_0",
+    "WC", "ukb-a-382",
+    "Microalbuminuria", "ukb-d-30500_irnt",
+    "Cystatin-c", "ukb-d-30720_irnt"
+) %>%
+    inner_join(clinmeta) %>%
+    filter(trait == "cad") %>%
+    group_by(Name) %>%
+    mutate(
+        beta_comp = abs(diff(beta_meta)),
+        se_comp = sqrt(sum(se_meta^2)),
+        pval_comp = 2 * pnorm(-abs(beta_comp / se_comp))
+    ) %>%
+    ungroup %>%
+    arrange(pval_comp) %>%
+    mutate(
+        fdrcorr = p.adjust(pval_comp, "fdr")
+    )
+head(establishedrf)
+```
+
+```{r}
+write_tsv(establishedrf, "../data/establishedrf.tsv")
+```
+
+```{r}
+options(repr.plot.width = 6.5, repr.plot.height = 3)
+g2 <- establishedrf %>%
+    mutate(
+        Name = ifelse(fdrcorr < 0.05, paste0("**", Name), Name),
+        Name = ifelse(pval_comp < 0.05, paste0("<b>", Name, "</b> "), Name),
+        grp = rep(1:2, each = n()/2)
+    ) %>%
+    ggplot(aes(beta_meta, reorder(Name, -pval_comp))) +
+    geom_vline(xintercept = 0, lty = "dashed") +
+    geom_linerange(aes(xmin = conf_low_meta, xmax = conf_high_meta,
+                       group = profile),
+                   position = position_dodge(width = .5)) +
+    geom_point(aes(color = profile, group = profile),
+               position = position_dodge(width = .5)) +
+    facet_wrap(~grp, scales = "free") +
+    labs(x = "SD units/LogOR per allele\n95% CI", y = NULL, color = "Profile") +
+    theme_bw() +
+    theme(
+        legend.position = "top", 
+        strip.background = element_blank(), 
+        strip.text = element_blank(),
+        axis.text.y = ggtext::element_markdown()
+    )
+g2
+```
+
+```{r}
+options(repr.plot.width = 6, repr.plot.height = 4)
+design <- "
+ABB
+CDD
+EFF
+GHH
+"
+patchwork::wrap_plots(
+    patchwork::plot_spacer(), patchwork::guide_area(),
+    grid::textGrob("Established", rot = 90, gp = grid::gpar(fontsize = 7)), g2 + labs(x = NULL), 
+    patchwork::plot_spacer(), grid::linesGrob(x = unit(c(0, 1), "npc"), 
+                                              y = unit(c(.5, .5), "npc")),
+    grid::textGrob("Phenome-wide comparison\n(FDR correction)", rot = 90, gp = grid::gpar(fontsize = 7)), g1,
+    design = design,
+    widths = c(.05, .95),
+    heights = c(.03, .48, .01, .48),
+    guides = "collect"
+) &
+    theme(
+        axis.text = element_text(size = 6),
+        axis.ticks = element_line(size = .25),
+        legend.position = "top",
+        legend.title = element_text(size = 8, face = "bold"),
+        legend.text = element_text(size = 6),
+        axis.title.x = element_text(size = 8)
+    )
+```
+
+Mother's age at death?:
+
+```{r}
+clinmeta %>%
+    filter(trait == "cad", 
+           grepl("age at death", name_exp, ignore.case = TRUE),
+           grepl("^ukb-b", id_exp)) %>%
+    group_by(id_exp) %>%
+    mutate(
+        beta_comp = abs(diff(beta_meta)),
+        se_comp = sqrt(sum(se_meta^2)),
+        pval_comp = 2 * pnorm(-abs(beta_comp / se_comp))
+    ) %>%
+    ungroup
+```
+
+```{r}
+options(repr.plot.width = 4, repr.plot.height = 2)
+clinmeta %>%
+    filter(trait == "cad", 
+           grepl("age at death", name_exp, ignore.case = TRUE),
+           grepl("^ukb-b", id_exp)) %>%
+    ggplot(aes(beta_meta, name_exp)) +
+    geom_vline(xintercept = 0, lty = "dashed") +
+    geom_linerange(aes(xmin = conf_low_meta, xmax = conf_high_meta,
+                       group = profile),
+                   position = position_dodge(width = .5)) +
+    geom_point(aes(color = profile, group = profile),
+               position = position_dodge(width = .5)) +
+    labs(x = "Beta GRS", y = NULL, color = "Profile") +
+    theme_bw() +
+    theme(legend.position = "top")
+```
+
+```{r}
+clinimpdf %>%
+    group_by(id_exp) %>%
+    filter(all(abs(beta_comp) > 0.001)) %>%
+    ungroup %>%
+    filter(trait == "cad", grepl("age at death", name_exp, ignore.case = TRUE))
+```
+
+## Significant differences found in metabolites
+
+```{r}
+metabimpdf <- read_tsv( "../data/metabimpdf.tsv", show_col_types = FALSE)
+head(metabimpdf)
+```
+
+```{r}
+options(repr.plot.width = 4, repr.plot.height = 3)
+metabimpdf %>%
+    mutate(
+        grp = case_when(
+            name_exp %in% c(
+                "Concentration of large HDL particles",
+                "Phospholipids in large HDL",
+                "Free cholesterol in large HDL"
+            ) ~ "Large HDL",
+            name_exp %in% c(
+                "Concentration of small VLDL particles",
+                "Phospholipids in small VLDL",
+                "Free cholesterol in small VLDL"
+            ) ~ "Small VLDL",
+            name_exp %in% c(
+                "Triglycerides in LDL",
+                "Glycoprotein acetyls",
+                "Ratio of apolipoprotein B to apolipoprotein A1"
+            ) ~ "Other\nindices"
+        ),
+        grp = factor(grp, levels = c("Large HDL", "Small VLDL", "Other\nindices")),
+        name_exp = stringr::str_replace_all(
+            name_exp,
+            c(
+                " of large HDL particles" = "",
+                " in large HDL" = "",
+                " of small VLDL particles" = "",
+                " in small VLDL" = "",
+                "Ratio of apolipoprotein B to apolipoprotein A1" = "ApoB/ApoA1 ratio"
+            )
+        ),
+        name_exp = factor(
+            name_exp,
+            levels = c(
+                "Glycoprotein acetyls",
+                "ApoB/ApoA1 ratio",
+                "Triglycerides in LDL",
+                "Phospholipids",
+                "Free cholesterol",
+                "Concentration"
+            )
+        )
+    ) %>%
+    drop_na %>%
+    ggplot(aes(beta_meta, name_exp)) +
+    geom_vline(xintercept = 0, lty = "dashed") +
+    geom_linerange(aes(xmin = conf_low_meta, xmax = conf_high_meta,
+                       group = profile),
+                   position = position_dodge(width = .5)) +
+    geom_point(aes(color = profile, group = profile),
+               position = position_dodge(width = .5)) +
+    facet_grid(grp ~ ., scales = "free", space = "free") +
+    theme_bw() +
+    labs(x = "SD units per allele\n95% CI", y = NULL, color = "Profile") +
+    theme(legend.position = "top", strip.text.y = element_text(angle = 0))
+```
+
+## Significant SNP-protein associations found
+
+```{r}
+protphewassig <- read_tsv("../data/protphewassig.tsv", show_col_types = FALSE)
+head(protphewassig)
+```
+
+```{r}
+protphewassig %>%
+    filter(trait == "cad", profile == "Discordant") %>%
+    nrow
+```
+
+```{r}
+protphewassig %>%
+    filter(trait == "cad", profile == "Discordant") %>%
+    count(nearest_gene)
+```
+
+To map to UniProt:
+
+```{r}
+protinfo <- read_csv("~/projects/DVA/Data/ReferenceData/SOMALOGIC_GWAS_protein_info.csv",
+                     show_col_types = FALSE) %>%
+    select(TargetFullName, Target, UniProt) %>%
+    unique
+```
+
+```{r}
+protsigdisc_cad <- protphewassig %>%
+    filter(trait == "cad", profile == "Discordant") %>%
+    select(id_exp, name_exp) %>%
+    unique %>%
+    inner_join(protinfo, by = c("name_exp" = "TargetFullName"))
+```
+
+To copy list of UniProt IDs to Gene Ontology for enrichment:
+
+```{r}
+protsigdisc_cad %>%
+    select(UniProt) %>%
+    unique %>%
+    knitr::kable("html") %>%
+    as.character %>%
+    IRdisplay::display_html()
+```
+
+## Significant SNP-Gene associations
+
+```{r}
+gtexphewasres <- read_tsv("../data/gtexphewasres.tsv", show_col_types = FALSE)
+```
+
+```{r}
+proxiestab <- readr::read_tsv("../data/proxiestab.tsv", show_col_types = FALSE)
+```
+
+SNP-Gene associations specific to the discordant profile:
+
+```{r}
+ctgwas_sig %>%
+    filter(trait == "cad", profile == "Discordant") %>%
+    inner_join(gtexphewasres) %>%
+    head
+```
+
+```{r}
+genes_disc <- ctgwas_sig %>%
+    filter(trait == "cad", profile == "Discordant") %>%
+    inner_join(gtexphewasres) %>%
+    select(gene_id) %>%
+    unique
+head(genes_disc)
+nrow(genes_disc)
+```
+
+List genes to copy to Gene Ontology for enrichment:
+
+```{r}
+genes_disc %>%
+    mutate(gene_id = gsub("\\..+$", "", gene_id)) %>%
+    knitr::kable(format = "html") %>%
+    as.character %>%
+    IRdisplay::display_html()
+```
+
+Distribution of genes with associations by tissue:
+
+```{r}
+discgenetiss <- ctgwas_sig %>%
+    filter(trait == "cad", profile == "Discordant") %>%
+    select(rsid) %>%
+    inner_join(gtexphewasres) %>%
+    select(tissue, gene_id) %>%
+    unique
+head(discgenetiss)
+```
+
+```{r}
+discgenetiss %>%
+    count(tissue, sort = TRUE) %>%
+    mutate(
+        nn = nrow(genes_disc) - n,
+        perc = round(100 * (n / nrow(genes_disc)))
+    )
+```
+
+## SNP-Gene associations in eQTLGen
+
+```{r}
+eqtlgenphewas <- read_tsv("../data/eqtlgenphewas.tsv", show_col_types = FALSE)
+```
+
+Discordant hits:
+
+```{r}
+eqtlgenphewas %>%
+    filter(profile == "Discordant", trait == "cad") %>%
+    select(name_exp) %>%
+    unique %>%
+    nrow
+```
+
+```{r}
+eqtlgenphewas %>%
+    filter(profile == "Discordant", trait == "cad") %>%
+    select(name_exp) %>%
+    unique %>%
+    knitr::kable(format = "html") %>%
+    as.character %>%
+    IRdisplay::display_html()
+```
+
+Overlap between GTEx and eQTLGen
+
+```{r}
+{
+    g1 <- eqtlgenphewas %>%
+        filter(profile == "Discordant", trait == "cad") %>%
+        pull(name_exp) %>%
+        unique 
+    any(genes_disc$gene_id %in% g1)
+    
+}
+```
+
+## Results of causal inference analysis
+
+```{r}
+mrctgwas_compsig <- read_tsv("../data/mrctgwas_compsig.tsv", show_col_types = FALSE)
+```
+
+```{r}
+head(mrctgwas_compsig)
+```
+
+```{r}
+options(repr.plot.height = 2.5, repr.plot.width = 3)
+mrctgwas_compsig %>%
+    group_by(exposure) %>%
+    filter(any(beta_meta < 0 & pval_meta < 0.05)) %>%
+    ungroup %>%
+    mutate(
+        across(c(beta_meta, conf_low_meta, conf_high_meta), ~exp(.x)),
+        exposure = case_match(
+            exposure,
+            "FreeCholSmallVLDL" ~ "Free cholesterol\nin small VLDL",
+            "ApoBtoApoA1" ~ "ApoB to ApoA1\nratio",
+            "PLinSmallVLDL" ~ "Phospholipids\nin small VLDL",
+            "TGinLDL" ~ "Triglycerides\nin LDL",
+            "ConcSmallVLDL" ~ "Concentration\nof small VLDL"
+        )
+    ) %>%
+    ggplot(aes(beta_meta, reorder(exposure, beta_comp))) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(group = sign_exp, 
+                       xmin = conf_low_meta, xmax = conf_high_meta),
+                   position = position_dodge(width = .5)) +
+    geom_point(aes(group = sign_exp, fill = sign_exp, shape = sign_exp),
+               position = position_dodge(width = .5)) +
+    scale_fill_manual(
+        values = c("orange", "magenta")
+    ) +
+    scale_shape_manual(
+        values = c(25, 24)
+    ) +
+    theme_bw() +
+    labs(x = "CAD OR per allele\n95% CI", y = "Exposure", 
+         fill = "Sign of\nexposure", shape = "Sign of\nexposure") +
+    theme(
+        legend.position = "top",
+        legend.title = element_text(size = 8),
+        legend.text = element_text(size = 7),
+        axis.text = element_text(size = 6),
+        axis.title = element_text(size = 8),
+        axis.ticks = element_line(size = .25)
+    )
+```
+
+## Results of SMR-HEIDI in proteins and genes
+
+- No significant results in proteins!
+
+- Results in GTEx:
+
+```{r}
+gtexmrres_disc <- read_tsv("../data/gtexmrres_disc.tsv", show_col_types = FALSE)
+head(gtexmrres_disc)
+```
+
+- Results in eQTLGen:
+
+```{r}
+eqtlgenexpdat_disc <- read_tsv("../data/eqtlgenexpdat_disc.tsv", show_col_types = FALSE)
+head(eqtlgenexpdat_disc)
+```
+
+```{r}
+eqtlgenexpdat_disc %>%
+    filter(outcome == "cad", is_probe)
+```
+
+```{r}
+allgenexpres <- bind_rows(
+    gtexmrres_disc %>%
+        filter(is_probe, outcome == "cad") %>%
+        transmute(
+            qtl_type,
+            tissue,
+            gene_id = gsub("\\..+$", "", gene_id), gene_name,
+            probe, chrom, pos,
+            pvalsmr_t2d, pvalsmr_cad = pvalsmr_outcome,
+            pvalheidi_t2d, pvalheidi_cad = pvalheidi_outcome,
+            beta_exp = beta_gtex, se_exp = se_gtex, pval_exp = pval_gtex,
+            beta_t2d, se_t2d, pval_t2d,
+            beta_cad = beta_outcome, se_cad = se_outcome, pval_cad = pval_outcome
+        ),
+    eqtlgenexpdat_disc %>%
+        filter(is_probe, outcome == "cad") %>%
+        transmute(
+            qtl_type = "eqtl",
+            tissue = "Whole_Blood",
+            gene_id = name_exp, gene_name,
+            probe, chrom, pos,
+            pvalsmr_t2d, pvalsmr_cad = pvalsmr_outcome,
+            pvalheidi_t2d, pvalheidi_cad = pvalheidi_outcome,
+            beta_exp, se_exp, pval_exp,
+            beta_t2d, se_t2d, pval_t2d,
+            beta_cad = beta_outcome, se_cad = se_outcome, pval_cad = pval_outcome
+        )
+)
+head(allgenexpres)
+```
+
+```{r}
+allgenexpres %>%
+    group_by(chrom, pos = pos %/% 1e6) %>%
+    reframe(genes = paste(unique(gene_name), collapse = ","),
+            tissues = paste(unique(tissue), collapse = ","))
+```
+
+```{r}
+allgenexpres %>%
+    slice_min(pvalsmr_cad, n = 2)
+```
+
+```{r}
+allgenexpres %>%
+    count(tissue, sort = TRUE) %>%
+    mutate(n = 100*n/sum(n))
+```
+
+```{r}
+allgenexpres %>%
+    group_by(tissue) %>%
+    summarise(
+        pvalsum = sum(-log10(pvalsmr_cad))
+    ) %>%
+    arrange(desc(pvalsum))
+```
+
+```{r}
+allgenexpres %>%
+    filter(gene_name == "HMGCR")
+```
+
+```{r}
+allgenexpres %>%
+    filter(gene_name == "KCNK5")
+```
+
+```{r}
+allgenexpres %>%
+    group_by(chrom, pos = pos %/% 1e6) %>%
+    reframe(genes = paste(unique(gene_name), collapse = ","))
+```
+
+```{r}
+options(repr.plot.width = 7, repr.plot.height = 7)
+allgenexpres %>%
+    pivot_longer(
+        c(beta_exp, se_exp, pval_exp,
+          beta_t2d, se_t2d, pval_t2d,
+          beta_cad, se_cad, pval_cad),
+        names_to = c(".value", "trait"),
+        names_sep = "_"
+    ) %>%
+    mutate(
+        ci = qnorm(1 - .05/2) * se,
+        upr = beta + ci,
+        lwr = beta - ci,
+        genreg = case_when(
+            gene_name %in% c("THADA", "PPM1B", "AC010883.5") ~ "Chr2p21\nTHADA",
+            gene_name %in% c("POLK", "COL4A3BP", "HMGCR") ~ "Chr5q13.3\nHMGCR-CERT1-POLK",
+            gene_name == "KCNK5" ~ "Chr6p21.2\nGLP1R-SAYSD1-KCNK5",
+            gene_name == "CENPW" ~ "Chr6q22.32\nCENPW",
+            gene_name == "ATP13A1" ~ "Chr19p13.11\nLPAR2-GMIP-ATP13A1",
+            gene_name == "CTB-129P6.4" ~ "Chr19q13.32\nNECTIN2-TOMM40-APOE-APOC1",
+            gene_name == "OSER1" ~ "Chr20q13.12\nJPH2-OSER1-GDAP1L1",
+            gene_name == "PNPLA3" ~ "Chr22q13.31\nPNLPA3-SAMM50-PARVB"
+        ),
+        gene_name = stringr::str_replace_all(
+            gene_name,
+            c(
+                "CTB-129P6.4" = "NECTIN2\nantisense",
+                "COL4A3BP" = "CERT1"
+            )
+        ),
+        betatype = ifelse(trait == "exp", qtl_type, "LogOR"),
+        betatype = stringr::str_replace_all(
+            betatype,
+            c(
+                "eqtl" = "eQTL SES",
+                "sqtl" = "sQTL SES"
+            )
+        ),
+        betatype = factor(
+            betatype, 
+            levels = c("LogOR", "eQTL SES", "sQTL SES")
+        ),
+        trait = case_match(
+            trait,
+            "exp" ~ "Gene",
+            "t2d" ~ "T2D",
+            "cad" ~ "CAD"
+        ),
+        trait = factor(trait, levels = c("Gene", "T2D", "CAD")),
+        tissue = gsub("_", " ", tissue),
+        tissue = stringr::str_replace_all(
+            tissue,
+            c(
+                "Gastroesophageal Junction" = "GEJ",
+                " Suprapubic" = "",
+                " Lower leg" = "",
+                "^Cells " = ""
+            )
+        ),
+    ) %>%
+    ggplot(aes(beta, interaction(probe, tissue, gene_name, sep = ";"))) +
+    geom_vline(xintercept = 0, lty = "dashed") +
+    geom_linerange(aes(xmin = lwr, xmax = upr)) +
+    geom_point(aes(color = betatype)) +
+    scale_color_manual(
+        values = c("black", "magenta", "deepskyblue")
+    ) +
+    scale_y_discrete(guide = ggh4x::guide_axis_nested(delim = ";")) +
+    facet_grid(reorder(genreg, chrom) ~ trait, scales = "free", space = "free_y") +
+    labs(x = "Estimate (95% CI)", y = NULL, color = NULL) +
+    theme_bw() +
+    theme(
+        axis.text = element_text(size = 5.5),
+        axis.ticks = element_line(size = .25),
+        strip.text.y = element_text(angle = 0, size = 6.5, hjust = 0),
+        strip.background.y = element_rect(fill = NA, color = NA),
+        legend.position = "top"
+    )
+```
+
+```{r}
+ct_dat <- read_tsv("../data/ct_dat.tsv", show_col_types = FALSE)
+head(ct_dat)
+```
+
+```{r}
+ct_dat %>%
+    filter(chrom == 6, pos >= 38900000, pos <= 39300000) %>%
+    transmute(rsid, pos, zt2d = beta_t2d / se_t2d, zcad = beta_cad /se_cad) %>%
+    pivot_longer(-c(rsid, pos)) %>%
+    ggplot(aes(pos, value)) +
+    geom_hline(yintercept = 0, lty = "dashed") +
+    geom_hline(yintercept = c(1,-1)*qnorm(1 - .05/2), lty = "dashed") +
+    annotate(
+        "segment", 
+        x = 39156749, xend = 39197226, y = 0, yend = 0,
+        colour = "blue",
+        size = 2
+    ) +
+    annotate(
+        "segment", 
+        x = 39016574, xend = 39055519, y = 0, yend = 0,
+        colour = "red",
+        size = 2
+    ) +
+    geom_point(shape = ".") +
+    facet_wrap(~name, ncol = 1)
+```
+
+```{r}
+ct_dat %>%
+    filter(chrom == 2, pos >= 21224301-1e6, pos <= 21266945 + 1e6) %>%
+    transmute(rsid, pos, zt2d = beta_t2d / se_t2d, zcad = beta_cad /se_cad) %>%
+    pivot_longer(-c(rsid, pos)) %>%
+    ggplot(aes(pos, value)) +
+    geom_hline(yintercept = 0, lty = "dashed") +
+    geom_hline(yintercept = c(1,-1)*qnorm(1 - .05/2), lty = "dashed") +
+    annotate(
+        "segment", 
+        x = 21224301, xend = 21266945, y = 0, yend = 0,
+        colour = "blue",
+        size = 2
+    ) +
+    geom_point(shape = ".") +
+    facet_wrap(~name, ncol = 1)
+```
+
+```{r}
+proxiestab %>% head
+```
+
+```{r}
+39156749 - 1e6
+```
+
+```{r}
+39197226 + 5e5
+```
+

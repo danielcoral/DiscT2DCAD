@@ -1,0 +1,61 @@
+---
+title: An R Markdown document converted from "18_GutMBPheWAS.ipynb"
+output: html_document
+---
+
+# Phenome-wide scan - Gut microbiome
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(purrr)
+```
+
+```{r}
+proxiestab <- readr::read_tsv("../data/proxiestab.tsv", show_col_types = FALSE)
+head(proxiestab)
+```
+
+```{r}
+proxiestab %>%
+    select(rsid) %>%
+    write_tsv("../data/proxiesrsids.tsv", col_names = FALSE)
+```
+
+```{r}
+taxa_df <- tibble(
+    taxa_folder = system("ls -d ~/projects/DVA/Data/gut_microbiome/*/", intern = TRUE)
+) %>%
+    mutate(
+        taxa = basename(taxa_folder), 
+        .before = 1
+    ) %>%
+    mutate(
+        taxa_files = map(
+            taxa_folder,
+            list.files
+        )
+    ) %>%
+    unnest(taxa_files) %>%
+    mutate(
+        taxa_files = paste0(taxa_folder, taxa_files),
+        grepcmd = paste("zgrep", "-Fwf", "../data/proxiesrsids.tsv", taxa_files),
+        taxa_tabs = map(
+            grepcmd,
+            ~read_tsv(
+                pipe(.x),
+                col_types = "c--cccnn-n--",
+                col_names = c("name_mb", "rsid_proxy", "nea_mb", "ea_mb", "beta_mb", "se_mb", "pval_mb")
+            )
+        )
+    ) %>%
+    select(-c(taxa_folder, taxa_files, grepcmd)) %>%
+    unnest(taxa_tabs)
+head(taxa_df)
+```
+
+```{r}
+write_tsv(taxa_df, "../data/taxa_df.tsv")
+```
+

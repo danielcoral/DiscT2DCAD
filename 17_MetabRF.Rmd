@@ -1,0 +1,86 @@
+---
+title: An R Markdown document converted from "17_MetabRF.ipynb"
+output: html_document
+---
+
+# Random forest - Metabolites
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+```
+
+```{r}
+metabphewas <- read_tsv("../data/metabphewas.tsv", show_col_types = FALSE)
+head(metabphewas)
+```
+
+```{r}
+metabmeta <- read_tsv("../data/metabmeta.tsv", show_col_types = FALSE)
+head(metabmeta)
+```
+
+```{r}
+metabcompsig <- read_tsv("../data/metabcompsig.tsv", show_col_types = FALSE)
+head(metabcompsig)
+```
+
+```{r}
+metabmat_long <- metabcompsig %>%
+    inner_join(metabphewas) %>%
+    transmute(trait, id_exp, profile, 
+              rsid, zsc_exp = beta_exp / se_exp)
+head(metabmat_long)
+```
+
+```{r}
+metabmat_wide <- metabmat_long %>%
+    pivot_wider(names_from = id_exp, values_from = zsc_exp) %>%
+    arrange(trait, profile)
+head(metabmat_wide)
+```
+
+```{r}
+borutares <- Boruta::Boruta(
+    x = select(metabmat_wide, -c(trait, profile, rsid)), 
+    y = factor(metabmat_wide$profile),
+    maxRuns = 1000
+)
+```
+
+```{r}
+metabimpdf <- Boruta::attStats(borutares)
+head(metabimpdf)
+```
+
+```{r}
+metabimpdf <- metabimpdf %>%
+    filter(decision != "Rejected") %>%
+    tibble::rownames_to_column("id_exp") %>%
+    inner_join(metabcompsig) %>%
+    inner_join(metabmeta)
+head(metabimpdf)
+```
+
+```{r}
+metabimpdf %>%
+    arrange(pval_comp) %>%
+    pull(name_exp) %>%
+    unique %>%
+    print
+```
+
+```{r}
+write_tsv(metabimpdf, "../data/metabimpdf.tsv")
+```
+
+```{r}
+metabdiff <- inner_join(metabimpdf, metabphewas)
+head(metabdiff)
+```
+
+```{r}
+write_tsv(metabdiff, "../data/metabdiff.tsv")
+```
+

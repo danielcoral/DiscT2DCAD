@@ -1,0 +1,216 @@
+---
+title: An R Markdown document converted from "01_T2D.ipynb"
+output: html_document
+---
+
+# Preparing T2D GWAS summary data
+
+---
+
+## Libraries
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(ggplot2)
+```
+
+---
+
+## T2D GWAS
+
+Results from [Mahajan et al 2022](https://doi.org/10.1038/s41588-022-01058-3):
+
+```{r}
+t2d <- read_table("~/projects/DVA/Data/GWAS_sumstats/t2d_euro_2022.txt",
+                  skip = 1,
+                  col_names = c("chrom", "pos",
+                                paste(c("ea", "nea", "eaf", "beta", "se", "pval"), "t2d", sep = "_")),
+                  col_types = "nn--ccnnnn")
+head(t2d)
+nrow(t2d)
+```
+
+---
+
+## Cleaning T2D data
+
+### Alleles to upper case
+
+```{r}
+t2d$ea_t2d <- toupper(t2d$ea_t2d)
+t2d$nea_t2d <- toupper(t2d$nea_t2d)
+```
+
+### Filtering indels
+
+```{r}
+t2d <- t2d %>%
+    filter(
+        nchar(ea_t2d) == 1,
+        nchar(ea_t2d) == 1
+    )
+nrow(t2d)
+```
+
+### Filtering MAF > 1%
+
+```{r}
+t2d <- t2d %>%
+    mutate(maf_t2d = ifelse(eaf_t2d < .5, eaf_t2d, 1 - eaf_t2d)) %>%
+    filter(maf_t2d >= 0.01)
+nrow(t2d)
+```
+
+### Filtering ambiguous palindromic SNPs (MAF > 40%)
+
+```{r}
+t2d <- t2d %>%
+    mutate(palind1 = ea_t2d %in% c("A", "T") & nea_t2d %in% c("A", "T"),
+           palind2 = ea_t2d %in% c("C", "G") & nea_t2d %in% c("C", "G"),
+           palind = palind1 | palind2,
+           palind_ambig = palind & maf_t2d > .4) %>%
+    filter(!palind_ambig) %>%
+    select(-c(palind1, palind2, palind, palind_ambig))
+nrow(t2d)
+```
+
+---
+
+## Reference: 1000G
+
+```{r}
+refdat <- read_tsv("~/projects/DVA/Data/ReferenceData/1kg.afreq",
+                   skip = 1,
+                   col_names = c("chrom", "pos", "rsid",
+                                 paste(c("nea", "ea", "eaf"), "1kg", sep = "_")),
+                   col_types = "nncccn")
+head(refdat)
+nrow(refdat)
+```
+
+## Cleaning reference
+
+### Filtering indels
+
+```{r}
+refdat <- refdat %>%
+    filter(nchar(ea_1kg) == 1, nchar(nea_1kg) == 1)
+nrow(refdat)
+```
+
+### Filtering MAF > 1%
+
+```{r}
+refdat <- refdat %>%
+    mutate(maf_1kg = ifelse(eaf_1kg < .5, eaf_1kg, 1 - eaf_1kg)) %>%
+    filter(maf_1kg >= 0.01)
+nrow(refdat)
+```
+
+### Filtering ambiguous palindromic SNPs (MAF > 40%)
+
+```{r}
+refdat <- refdat %>%
+    mutate(palind1 = ea_1kg %in% c("A", "T") & nea_1kg %in% c("A", "T"),
+           palind2 = ea_1kg %in% c("C", "G") & nea_1kg %in% c("C", "G"),
+           palind = palind1 | palind2,
+           palind_ambig = palind & maf_1kg > .4) %>%
+    filter(!palind_ambig) %>%
+    select(-c(palind1, palind2, palind, palind_ambig)) 
+nrow(refdat)
+```
+
+---
+
+## Joining with reference
+
+```{r}
+t2d <- t2d %>%
+    inner_join(refdat)
+head(t2d)
+nrow(t2d)
+```
+
+---
+
+## Cleaning joint data
+
+### Concordance in MAF
+
+```{r}
+t2d <- t2d %>%
+     filter(abs(maf_t2d - maf_1kg) < .2)
+nrow(t2d)
+```
+
+### Allele concordance
+
+```{r}
+t2d <- t2d %>%
+    mutate(
+        across(
+            c(ea_1kg, nea_1kg),
+            ~stringr::str_replace_all(.x, c("A" = "t", "T" = "a", "C" = "g", "G" = "c")),
+            .names = "{.col}_flip"
+        ),
+        across(
+            c(ea_1kg_flip, nea_1kg_flip),
+            ~toupper(.x)
+        ),
+        harmon1 = case_when(
+            ea_t2d == ea_1kg & nea_t2d == nea_1kg ~ 1,
+            ea_t2d == nea_1kg & nea_t2d == ea_1kg ~ -1,
+            TRUE ~ NaN
+        ),
+        harmon2 = case_when(
+            ea_t2d == ea_1kg_flip & nea_t2d == nea_1kg_flip ~ 1,
+            ea_t2d == nea_1kg_flip & nea_t2d == ea_1kg_flip ~ -1,
+            TRUE ~ NaN
+        ),
+        harmon = coalesce(harmon1, harmon2)
+    ) %>%
+    filter(!is.na(harmon))
+nrow(t2d)
+```
+
+### Align effects to allele increasing T2D risk
+
+```{r}
+t2d <- t2d %>%
+    mutate(
+        ea = ifelse(beta_t2d > 0, ea_t2d, nea_t2d),
+        nea = ifelse(beta_t2d > 0, nea_t2d, ea_t2d),
+        eaf = ifelse(beta_t2d > 0, eaf_t2d, 1 - eaf_t2d),
+        beta_t2d = abs(beta_t2d)
+    )
+```
+
+### Column selection
+
+```{r}
+t2d <- t2d %>%
+    select(-c(ea_t2d, nea_t2d, eaf_t2d)) %>%
+    rename(ea_t2d = ea, nea_t2d = nea, eaf_t2d = eaf) %>%
+    select(
+        chrom, pos, rsid,
+        all_of(
+            paste(
+                c("ea", "nea", "eaf", "maf", "beta", "se", "pval"),
+                "t2d", sep = "_"
+            )
+        )
+    )
+head(t2d)
+nrow(t2d)
+```
+
+---
+
+## Saving
+
+```{r}
+write_tsv(t2d, "../data/t2d.tsv")
+```
+

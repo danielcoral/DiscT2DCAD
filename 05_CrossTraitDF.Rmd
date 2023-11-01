@@ -1,0 +1,50 @@
+---
+title: An R Markdown document converted from "05_CrossTraitDF.ipynb"
+output: html_document
+---
+
+# Cross-trait GWAS
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(purrr)
+```
+
+## Importing data
+
+```{r}
+t2d_cad <- read_tsv("../data/t2d_cad.tsv", show_col_types = FALSE)
+head(t2d_cad)
+```
+
+```{r}
+t2d_ckd <- read_tsv("../data/t2d_ckd.tsv", show_col_types = FALSE)
+head(t2d_ckd)
+```
+
+```{r}
+t2d_stroke <- read_tsv("../data/t2d_stroke.tsv", show_col_types = FALSE)
+head(t2d_stroke)
+```
+
+## Combined cross-trait dataset
+
+```{r}
+ct_dat <- list(
+    t2d_cad,
+    t2d_ckd,
+    t2d_stroke
+) %>%
+    reduce(inner_join)
+head(ct_dat)
+```
+
+```{r}
+nrow(ct_dat)
+```
+
+```{r}
+write_tsv(ct_dat, "../data/ct_dat.tsv")
+```
+

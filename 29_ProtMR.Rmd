@@ -1,0 +1,235 @@
+---
+title: An R Markdown document converted from "29_ProtMR.ipynb"
+output: html_document
+---
+
+# Instrumental analysis - Proteins
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(purrr)
+```
+
+```{r}
+source("00_MR_FX.R")
+```
+
+```{r}
+protphewassig <- read_tsv("../data/protphewassig.tsv", show_col_types = FALSE)
+head(protphewassig)
+```
+
+```{r}
+protsigdisc_cad <- protphewassig %>%
+    filter(trait == "cad", profile == "Discordant") %>%
+    select(id_exp, name_exp) %>%
+    unique
+head(protsigdisc_cad)
+```
+
+```{r}
+protinfo <- read_csv("~/projects/DVA/Data/ReferenceData/SOMALOGIC_GWAS_protein_info.csv",
+                     show_col_types = FALSE)
+head(protinfo)
+```
+
+```{r}
+protinfo <- protinfo %>%
+    select(TargetFullName, Target, UniProt) %>%
+    unique
+head(protinfo)
+```
+
+```{r}
+protsigdisc_cad <- protsigdisc_cad %>%
+    inner_join(protinfo, by = c("name_exp" = "TargetFullName"))
+head(protsigdisc_cad)
+```
+
+```{r}
+protsigdisc_cad %>%
+    select(UniProt) %>%
+    unique %>%
+    knitr::kable("html") %>%
+    as.character %>%
+    IRdisplay::display_html()
+```
+
+```{r}
+uniprotinfo <- read_tsv(
+    "~/projects/DVA/Data/ReferenceData/Uniprot_Mapping.dat.gz", 
+    col_types = "ccc",
+    col_names = c("UniProt", "db_name", "db_value")
+)
+head(uniprotinfo)
+```
+
+```{r}
+uniprot_ensembl <- uniprotinfo %>%
+    filter(db_name == "Ensembl") %>%
+    select(-db_name) %>%
+    rename(gene_id = db_value) %>%
+    unique
+head(uniprot_ensembl)
+```
+
+```{r}
+protsigdisc_cad <- protsigdisc_cad %>%
+    inner_join(uniprot_ensembl, relationship = "many-to-many")
+head(protsigdisc_cad)
+```
+
+```{r}
+gencode <- rtracklayer::readGFF("~/projects/DVA/Data/ReferenceData/gencode.v19.annotation.gtf")
+head(gencode)
+```
+
+```{r}
+gene_regions <- gencode %>%
+    filter(type == "gene") %>%
+    transmute(chrom = as.numeric(gsub("chr", "", seqid)), 
+              gene_id = gsub("\\..+$", "", gene_id), 
+              start, end) %>%
+    drop_na
+head(gene_regions)
+```
+
+```{r}
+protsigdisc_cad <- protsigdisc_cad %>%
+    inner_join(gene_regions, relationship = "many-to-many")
+head(protsigdisc_cad)
+```
+
+```{r}
+protsigdisc_cad <- protsigdisc_cad %>%
+    mutate(
+        regionquery = paste0(chrom, ":", start - 5e5, "-", end + 5e5)
+    )
+head(protsigdisc_cad)
+```
+
+```{r}
+protexpdat <- NULL
+for(i in 1:nrow(protsigdisc_cad)){
+    ID <- protsigdisc_cad$id_exp[i]
+    regq <- protsigdisc_cad$regionquery[i]
+    message(paste("Querying top hits of", ID, "-", i, "of", nrow(protsigdisc_cad)))
+    res <- ieugwasr::associations(variants = regq, id = ID, proxies = 0)
+    while(class(res)[1] == "response"){
+        message("Waiting 1 minute for server to respond...")
+        Sys.sleep(60)
+        message("Retrying...")
+        res <- ieugwasr::associations(variants = regq, id = ID, proxies = 0)
+    }
+    protexpdat <- rbind(protexpdat, res)
+    message("Done!")
+    Sys.sleep(5)
+}
+write_tsv(protexpdat, "../data/protexpdat.tsv")
+```
+
+```{r}
+protexpdat <- read_tsv("../data/protexpdat.tsv", show_col_types = FALSE)
+head(protexpdat)
+```
+
+```{r}
+instrum_thresh <- pchisq(q = 10, df = 1, lower.tail = FALSE)
+instrum_thresh
+```
+
+```{r}
+protexpdat <- protexpdat %>%
+    filter(p <= instrum_thresh) %>%
+    transmute(
+        chrom = chr, pos = position, rsid,
+        id_exp = id, name_exp = trait,
+        ea_exp = ea, nea_exp = nea, eaf_exp = eaf,
+        beta_exp = beta, se_exp = se, pval_exp = p
+    )
+head(protexpdat)
+```
+
+```{r}
+t2d_cad <- read_tsv("../data/t2d_cad.tsv", show_col_types = FALSE)
+head(t2d_cad)
+```
+
+```{r}
+prott2dcad <- inner_join(protexpdat, t2d_cad, by = join_by(chrom, pos, rsid))
+head(prott2dcad)
+```
+
+```{r}
+prott2dcad <- prott2dcad %>%
+    mutate(
+        across(
+            c(ea_exp, nea_exp),
+            ~stringr::str_replace_all(.x, c("A" = "t", "T" = "a", "C" = "g", "G" = "c")),
+            .names = "{.col}_flip"
+        ),
+        across(
+            c(ea_exp_flip, nea_exp_flip),
+            ~toupper(.x)
+        ),
+        harmon1 = case_when(
+            ea_t2d == ea_exp & nea_t2d == nea_exp ~ 1,
+            ea_t2d == nea_exp & nea_t2d == ea_exp ~ -1,
+            TRUE ~ NaN
+        ),
+        harmon2 = case_when(
+            ea_t2d == ea_exp_flip & nea_t2d == nea_exp_flip ~ 1,
+            ea_t2d == nea_exp_flip & nea_t2d == ea_exp_flip ~ -1,
+            TRUE ~ NaN
+        ),
+        harmon = coalesce(harmon1, harmon2),
+        beta_exp = beta_exp * harmon,
+        eaf_exp = ifelse(harmon == 1, eaf_exp, 1 - eaf_exp)
+    ) %>%
+    filter(!is.na(harmon), abs(eaf_exp - eaf_t2d) < .2, abs(eaf_exp - eaf_cad) < .2) %>%
+    select(-c(ea_exp, nea_exp, ea_exp_flip, nea_exp_flip, harmon, harmon1, harmon2))
+head(prott2dcad)
+```
+
+```{r}
+prott2dcad_nested <- nest(prott2dcad, data = -c(id_exp, name_exp))
+print(prott2dcad_nested)
+```
+
+```{r}
+prott2dcad_sig <- prott2dcad_nested %>%
+    mutate(
+        anytophit = map_lgl(data, ~any(.x$pval_exp <= 5e-8))
+    ) %>%
+    filter(anytophit) %>%
+    select(-anytophit)
+print(prott2dcad_sig)
+```
+
+```{r}
+prott2dcad_smr <- prott2dcad_sig %>%
+    mutate(
+        smrdat = map(
+            data,
+            ~{
+                tophit <- slice_min(.x, pval_exp, with_ties = FALSE)
+                transmute(
+                    tophit,
+                    probe = rsid, sign_exp = sign(beta_exp), sign_cad = sign(beta_cad),
+                    pvalsmr_t2d = pval_smr(beta_exp, se_exp, beta_t2d, se_t2d),
+                    pvalsmr_outcome = pval_smr(beta_exp, se_exp, beta_cad, se_cad)
+                )
+            }
+        )
+    ) %>%
+    unnest(smrdat)
+print(prott2dcad_smr)
+```
+
+```{r}
+prott2dcad_smr %>%
+    select(-data)
+```
+

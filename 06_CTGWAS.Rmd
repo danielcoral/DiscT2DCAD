@@ -1,0 +1,95 @@
+---
+title: An R Markdown document converted from "06_CTGWAS.ipynb"
+output: html_document
+---
+
+# Cross-trait GWAS
+
+## Library
+
+Applying the method from [Xiong et al 2022](https://doi.org/10.1038/s41467-022-35328-9)
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(CGWAS)
+```
+
+## Cross-trait dataframe
+
+```{r}
+ct_dat <- read_tsv("../data/ct_dat.tsv", show_col_types = FALSE)
+```
+
+```{r}
+head(ct_dat)
+```
+
+## Pair-wise cross-trait analysis
+
+### Preparing paths
+
+```{r}
+ctgwaspath <- "../data/ctgwas"
+```
+
+```{r}
+inputpath <- file.path(ctgwaspath, "input")
+```
+
+```{r}
+traits <- c("t2d", "cad", "ckd", "stroke")
+```
+
+```{r}
+inputfiles <- file.path(inputpath, paste0(traits, ".tsv"))
+names(inputfiles) <- traits
+```
+
+```{r}
+snpinfo <- file.path(ctgwaspath, "snpinfo.tsv")
+```
+
+```{r}
+mafdat <- file.path(ctgwaspath, "mafdat.tsv")
+```
+
+### Producing files needed
+
+```{r}
+for(trait in traits){
+    write_tsv(select(ct_dat, 
+                     BETA = paste0("beta_", trait),
+                     P = paste0("pval_", trait)),
+              inputfiles[trait])
+}
+```
+
+```{r}
+write_tsv(transmute(ct_dat, CHR = chrom, BP = pos, 
+                    SNP = paste(chrom, pos, ea_t2d, nea_t2d, sep = ":")),
+          snpinfo)
+```
+
+```{r}
+write_tsv(transmute(ct_dat, MAF = ifelse(eaf_t2d < .5, eaf_t2d, 1 - eaf_t2d)), mafdat)
+```
+
+## Pairwise cross-trait GWAS
+
+```{r}
+for(trait in traits[traits != "t2d"]){
+    traitpair <- c("t2d", trait)
+    inputpair <- inputfiles[traitpair]
+    outputpair <- file.path(ctgwaspath, "pairwise", trait)
+    cgwas(
+        gwasFilePath = inputpair, 
+        snpFilePath = snpinfo, 
+        outputPath = outputpair,
+        traitName = traitpair,
+        mrafFilePath = mafdat,
+        threadN = 4
+    )
+}
+```
+

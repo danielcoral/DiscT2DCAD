@@ -1,0 +1,2532 @@
+---
+title: An R Markdown document converted from "38_PRS.ipynb"
+output: html_document
+---
+
+# Association of PRS to MACE
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(purrr)
+library(ggplot2)
+```
+
+```{r}
+options(repr.plot.res = 300)
+```
+
+## Biomarker data
+
+```{r}
+recoded_dat <- read_tsv("../data/recoded_dat.tsv", show_col_types = FALSE)
+head(recoded_dat)
+```
+
+## Disease and medication data
+
+```{r}
+dxmed <- read_tsv("../data/dxmed.tsv", show_col_types = FALSE)
+head(dxmed)
+```
+
+## Polygenic scores
+
+```{r}
+prsdat <- read_tsv("../data/prsdat.tsv", show_col_types = FALSE)
+```
+
+```{r}
+head(prsdat)
+```
+
+```{r}
+var(prsdat$Concordant)
+```
+
+```{r}
+var(prsdat$Discordant)
+```
+
+## Survival data
+
+```{r}
+survmacedat <- read_tsv("../data/survmacedat.tsv", show_col_types = FALSE)
+head(survmacedat)
+```
+
+## SCORE2
+
+```{r}
+score2dat <- recoded_dat %>%
+    inner_join(dxmed, by = "eid") %>%
+    transmute(
+        eid,
+        sex,
+        age,
+        smoking,
+        sbp,
+        tchol,
+        hdl,
+        age_smoking = age*smoking,
+        age_sbp = age*sbp,
+        age_tchol = age*tchol,
+        age_hdl = age*hdl,
+        T2D, Insulin, AntiDM, AntiHT, LipidLower,
+        T2Dage = ifelse(T2Dage > age, age, T2Dage),
+        age_T2D = age*T2D,
+        hba1c,
+        age_hba1c = age*hba1c,
+        lnegfr = log(egfr),
+        lnegfrsq = lnegfr^2,
+        age_lnegfr = age*lnegfr,
+        across(all_of(paste0("gpc", 1:10)))
+    ) %>%
+    inner_join(prsdat, by = "eid") %>%
+    inner_join(survmacedat, by = "eid")
+head(score2dat)
+```
+
+```{r}
+quantile(score2dat$outcome_timeyrs) %>% round(2)
+```
+
+```{r}
+summary(score2dat$age)
+```
+
+```{r}
+prop.table(table(score2dat$sex))
+```
+
+```{r}
+prop.table(table(score2dat$T2D))
+```
+
+```{r}
+prop.table(table(score2dat$smoking))
+```
+
+```{r}
+prop.table(table(score2dat$priorMACE))
+```
+
+## Stratification by sex
+
+```{r}
+score2datbysex <- score2dat %>%
+    nest(Data = -sex)
+print(score2datbysex)
+```
+
+## Primary prevention setting
+
+```{r}
+ppdat <- score2datbysex %>%
+    mutate(
+        Data = map(Data, filter, priorMACE == 0),
+        Data = map(Data, select, -c(priorMACE, priorMACE_timeyrs)),
+        Data = map(Data, drop_na)
+    )
+print(ppdat)
+```
+
+```{r}
+ppdat %>%
+    mutate(Data = map_dbl(Data, nrow)) %>%
+    unnest(Data) %>%
+    pull(Data) %>%
+    sum
+```
+
+```{r}
+ppdat %>%
+    mutate(Data = map_dbl(Data, ~sum(.x$outcome_value))) %>%
+    pull(Data) %>%
+    sum
+```
+
+### Marginal associations
+
+```{r}
+ppdat %>%
+    unnest(Data) %>%
+    {
+        survival::coxph(
+            reformulate(
+                termlabels = c("age", paste0("gpc", 1:10), "Concordant", "Discordant"),
+                response = "survival::Surv(time = outcome_timeyrs, event = outcome_value)"
+            ),
+            data = .
+        )
+    } %>%
+    broom::tidy() %>%
+    filter(term %in% c("Concordant", "Discordant")) %>%
+    mutate(
+        lwr = estimate - qnorm(1 - .05/2)*std.error,
+        upr = estimate + qnorm(1 - .05/2)*std.error,
+        bcomp = abs(diff(estimate)),
+        bcomp_se = sqrt(sum(std.error^2)),
+        bcomp_pval = 2 * pnorm(-bcomp/bcomp_se)
+    )
+```
+
+```{r}
+ppdat <- ppdat %>%
+    mutate(
+        modprs = map(
+            Data,
+            ~survival::coxph(
+                reformulate(
+                    termlabels = c("age", paste0("gpc", 1:10), "Concordant", "Discordant"),
+                    response = "survival::Surv(time = outcome_timeyrs, event = outcome_value)"
+                ),
+                data = .x
+            )
+        )
+    )
+print(ppdat)
+```
+
+```{r}
+simpmodres <- ppdat %>%
+    transmute(
+        sex,
+        modres = map(modprs, broom::tidy)
+    ) %>%
+    unnest(modres) %>%
+    filter(term %in% c("Concordant", "Discordant")) %>%
+    group_by(sex) %>%
+    mutate(
+        lwr = estimate - qnorm(1 - .05/2)*std.error,
+        upr = estimate + qnorm(1 - .05/2)*std.error,
+        bcomp = abs(diff(estimate)),
+        bcomp_se = sqrt(sum(std.error^2)),
+        bcomp_pval = 2 * pnorm(-bcomp/bcomp_se)
+    ) %>%
+    ungroup
+simpmodres
+```
+
+### Associations adjusted by T2D
+
+```{r}
+ppdat <- ppdat %>%
+    mutate(
+        modprsadjt2d = map(
+            Data,
+            ~survival::coxph(
+                reformulate(
+                    termlabels = c("age", paste0("gpc", 1:10), "T2D", "Concordant", "Discordant"),
+                    response = "survival::Surv(time = outcome_timeyrs, event = outcome_value)"
+                ),
+                data = .x
+            )
+        )
+    )
+print(ppdat)
+```
+
+```{r}
+simpmodresadj <- ppdat %>%
+    transmute(
+        sex,
+        modres = map(modprsadjt2d, broom::tidy, exponentiate = TRUE, conf.int = TRUE)
+    ) %>%
+    unnest(modres) %>%
+    filter(term %in% c("Concordant", "Discordant"))
+simpmodresadj
+```
+
+```{r}
+options(repr.plot.width = 6, repr.plot.height = 2)
+bind_rows(
+    Unadj = simpmodres,
+    T2Dadj = simpmodresadj,
+    .id = "Model"
+) %>%
+    ggplot(aes(estimate, interaction(Model, term))) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(
+        aes(xmin = conf.low, xmax = conf.high)
+    ) +
+    geom_point() +
+    facet_wrap(~sex) +
+    scale_y_discrete(guide = ggh4x::guide_axis_nested()) +
+    theme_bw() +
+    labs(
+        x = "HR per allele (95% CI)",
+        y = NULL
+    )
+```
+
+### Marginal associations by T2D strata
+
+```{r}
+ppdat <- ppdat %>%
+    mutate(
+        modprsbyt2d = map(
+            Data,
+            ~survival::coxph(
+                    reformulate(
+                        termlabels = c("age", paste0("gpc", 1:10), 
+                                       "T2D", c("Concordant", "Discordant"),
+                                       paste("T2D", c("Concordant", "Discordant"), sep = ":")),
+                        response = "survival::Surv(time = outcome_timeyrs, event = outcome_value)"
+                    ),
+                    data = .x
+                )
+        )
+    )
+print(ppdat)
+```
+
+```{r}
+margbetasbyt2d <- ppdat %>%
+    transmute(
+        sex, 
+        modres = map(modprsbyt2d, broom::tidy, conf.int = TRUE)
+    ) %>%
+    unnest(modres) %>%
+    filter(!term %in% c("age", paste0("gpc", 1:10)))
+margbetasbyt2d
+```
+
+```{r}
+margestbyt2d <- ppdat %>%
+    transmute(
+        sex, 
+        modprsbyt2d = map(
+            modprsbyt2d,
+            function(MODEL){
+                map(
+                    c("Concordant", "Discordant"),
+                    function(PROFILE){
+                        RES1 <- data.frame(
+                            Profile = PROFILE,
+                            Subset = "Without T2D",
+                            Estimate = coef(MODEL)[PROFILE],
+                            SE = sqrt(drop(vcov(MODEL)[PROFILE, PROFILE]))
+                        )
+                        TERMS <- c(PROFILE, paste("T2D", PROFILE, sep = ":"))
+                        RES2 <- data.frame(
+                            Profile = PROFILE,
+                            Subset = "With T2D",
+                            Estimate = sum(coef(MODEL)[TERMS]),
+                            SE = sqrt(drop(c(1,1) %*% vcov(MODEL)[TERMS, TERMS] %*% c(1,1)))
+                        )
+                        bind_rows(RES1, RES2)
+                    }
+                ) %>%
+                bind_rows
+            }
+        )
+    ) %>%
+    unnest(modprsbyt2d) %>%
+    mutate(
+        Lower = Estimate - (qnorm(1 - (.05/2)) * SE),
+        Upper = Estimate + (qnorm(1 - (.05/2)) * SE),
+        Pval = 2*pnorm(-abs(Estimate/SE)),
+        across(c(Estimate, Lower, Upper), exp),
+        SE = NULL
+    )
+margestbyt2d
+```
+
+```{r}
+margestbyt2d %>%
+    ggplot(aes(Estimate, interaction(Subset, Profile))) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(
+        aes(xmin = Lower, xmax = Upper)
+    ) +
+    geom_point() +
+    facet_wrap(~sex) +
+    scale_y_discrete(guide = ggh4x::guide_axis_nested()) +
+    theme_bw() +
+    labs(
+        x = "HR per allele (95% CI)",
+        y = NULL
+    )
+```
+
+## Does these associations remain after adjustment by covariates in SCORE2?
+
+```{r}
+ppdat <- ppdat %>%
+    mutate(
+        modprscore2 = map(
+            Data,
+            ~survival::coxph(
+                reformulate(
+                    termlabels = ". - eid",
+                    response = "survival::Surv(time = outcome_timeyrs, event = outcome_value)"
+                ),
+                data = .x,
+            )
+        )
+    )
+print(ppdat)
+```
+
+```{r}
+score2prsres <- ppdat %>%
+    transmute(
+        sex,
+        modres = map(modprscore2, broom::tidy)
+    ) %>%
+    unnest(modres) %>%
+    filter(term %in% c("Concordant", "Discordant")) %>%
+    group_by(sex) %>%
+    mutate(
+        lwr = estimate - qnorm(1 - .05/2)*std.error,
+        upr = estimate + qnorm(1 - .05/2)*std.error,
+        bcomp = abs(diff(estimate)),
+        bcomp_se = sqrt(sum(std.error^2)),
+        bcomp_pval = 2 * pnorm(-bcomp/bcomp_se)
+    ) %>%
+    ungroup
+score2prsres
+```
+
+```{r}
+options(repr.plot.width = 6, repr.plot.height = 2)
+bind_rows(
+    Unadj = simpmodres,
+    SCORE2Adj = score2prsres,
+    .id = "Model"
+) %>%
+    ggplot(aes(estimate, interaction(Model, term))) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(
+        aes(xmin = conf.low, xmax = conf.high)
+    ) +
+    geom_point() +
+    facet_wrap(~sex) +
+    scale_y_discrete(guide = ggh4x::guide_axis_nested()) +
+    theme_bw() +
+    labs(
+        x = "HR per allele (95% CI)",
+        y = NULL
+    )
+```
+
+## Additional information for prediction
+
+```{r}
+ppdat <- ppdat %>%
+    mutate(
+        modnull = map(
+            Data,
+            ~survival::coxph(
+                reformulate(
+                    termlabels = "1",
+                    response = "survival::Surv(time = outcome_timeyrs, event = outcome_value)"
+                ),
+                data = .x
+            )
+        ),
+        modscore2 = map(
+            Data,
+            ~survival::coxph(
+                reformulate(
+                    termlabels = ". - eid - Concordant - Discordant",
+                    response = "survival::Surv(time = outcome_timeyrs, event = outcome_value)"
+                ),
+                data = .x
+            )
+        )
+    )
+print(ppdat)
+```
+
+```{r}
+lrtres <- ppdat %>%
+    transmute(
+        sex,
+        across(
+            c(modnull, modscore2, modprscore2),
+            ~map_dbl(.x, logLik),
+            .names = "LL{.col}"
+        ),
+        across(starts_with("LL"), ~2*abs(.x - LLmodnull),
+               .names = "LR{.col}"),
+        LRLLmodnull = NULL,
+        across(
+            c(modscore2, modprscore2),
+            ~map_dbl(.x, \(MOD) sum(!is.na(MOD$coefficients))),
+            .names = "NV{.col}"
+        ),
+        LRTp = pchisq(
+            q = 2 * abs(LLmodprscore2 - LLmodscore2),
+            df = NVmodprscore2 - NVmodscore2,
+            lower.tail = FALSE
+        ),
+        FAI = 100 * (1 - (LRLLmodscore2 / LRLLmodprscore2)),
+        across(
+            c(modscore2, modprscore2),
+            ~map_dbl(.x, \(MOD) extractAIC(MOD)[2]),
+            .names = "AIC{.col}"
+        ),
+    )
+lrtres
+```
+
+## C-statistic
+
+```{r}
+Ctab <- ppdat %>%
+    transmute(
+        sex,
+        Cdat = map2(modprscore2, modscore2, survival::concordance),
+        Cdat = map(
+            Cdat, 
+            ~tibble(
+                model = c("prscore2", "score2"),
+                Cstat = .x$concordance,
+                Cstatse = sqrt(diag(.x$var)),
+                Cdiff = drop(c(1, -1) %*% .x$concordance),
+                Cdiffse = drop(sqrt(c(1, -1) %*% .x$var %*% c(1, -1)))
+            )
+        )
+    ) %>%
+    unnest(Cdat) %>%
+    mutate(
+        CdiffLower = Cdiff - qnorm(1 - .05/2)*Cdiffse,
+        CdiffUpper = Cdiff + qnorm(1 - .05/2)*Cdiffse,
+        Cdiffp = 2 * pnorm(-abs(Cdiff/Cdiffse)),
+        across(c(Cdiff, CdiffLower, CdiffUpper), ~round(.x, digits = 3))
+    )
+Ctab
+```
+
+## Bootstrapped samples
+
+```{r}
+bootdat <- ppdat %>%
+    expand_grid(
+        bootn = 1:100
+    ) %>%
+    transmute(
+        sex, bootn,
+        Data = map2(
+            bootn, Data,
+            ~{
+                set.seed(.x)
+                ivec <- sample(1:nrow(.y), nrow(.y), replace=TRUE)
+                .y[ivec,]
+            }
+        ),
+        modnull = map(
+            Data,
+            ~survival::coxph(
+                survival::Surv(time = outcome_timeyrs, event = outcome_value) ~ 1,
+                data = .x,
+                model = TRUE
+            )
+        ),
+        across(
+            c(modscore2, modprscore2),
+            ~map2(
+                .x, Data,
+                function(MOD, DAT){
+                    survival::coxph(
+                        formula = formula(MOD),
+                        data = DAT,
+                        model = TRUE
+                    )
+                }
+            )
+        )
+    )
+print(bootdat)
+```
+
+## Confidence interval of FAI
+
+```{r}
+bootdat %>%
+    mutate(
+        across(c(modnull, modscore2, modprscore2), ~map_dbl(.x, logLik)),
+        across(c(modscore2, modprscore2), ~abs(.x - modnull)),
+        FAI = 100 * (1 - (modscore2 / modprscore2))
+    ) %>%
+    group_by(sex) %>%
+    summarise(
+        FAIm = median(FAI),
+        lwr = quantile(FAI, probs = .025),
+        upr = quantile(FAI, probs = .975)
+    )
+```
+
+## Log-likelihoods at different pre-test probabilities
+
+```{r}
+FAIperPreTest <- bootdat %>%
+    expand_grid(
+        thresh = seq(0.05, .25, .05),
+    ) %>%
+    mutate(
+        Data = map2(
+            Data, modscore2,
+            function(DAT, MOD){
+                NewDat <- mutate(DAT, outcome_timeyrs = 10, outcome_value = 0)
+                mutate(DAT, PredRisk = 1 - predict(MOD, newdata = NewDat, type = "survival"))
+            }
+        ),
+        Data = map2(Data, thresh, ~filter(.x, PredRisk >= .y)),
+        modnull = map(
+            Data,
+            ~survival::coxph(
+                survival::Surv(time = outcome_timeyrs, event = outcome_value) ~ 1,
+                data = .x
+            )
+        ),
+        across(
+            c(modscore2, modprscore2),
+            ~map2(
+                .x, Data,
+                function(MOD, DAT){
+                    survival::coxph(
+                        formula = formula(MOD),
+                        data = DAT,
+                        init = coef(MOD),
+                        control = survival::coxph.control(iter.max = 0)
+                    )
+                }
+            )
+        ),
+        across(c(modnull, modscore2, modprscore2), ~map_dbl(.x, logLik)),
+        across(c(modscore2, modprscore2), ~abs(.x - modnull)),
+        FAI = 100 * (1 - (modscore2 / modprscore2))
+    ) %>%
+    group_by(sex, thresh) %>%
+    summarise(
+        FAIm = median(FAI),
+        lwr = quantile(FAI, probs = .025),
+        upr = quantile(FAI, probs = .975)
+    )
+print(FAIperPreTest)
+```
+
+```{r}
+options(repr.plot.width = 6, repr.plot.height = 3)
+faig <- bootdat %>%
+    mutate(
+        across(c(modnull, modscore2, modprscore2), ~map_dbl(.x, logLik)),
+        across(c(modscore2, modprscore2), ~abs(.x - modnull)),
+        FAI = 100 * (1 - (modscore2 / modprscore2))
+    ) %>%
+    group_by(sex) %>%
+    summarise(
+        FAIm = median(FAI),
+        lwr = quantile(FAI, probs = .025),
+        upr = quantile(FAI, probs = .975)
+    ) %>%
+    mutate(thresh = 0) %>%
+    bind_rows(FAIperPreTest) %>%
+    mutate(across(c(FAIm, lwr, upr), ~pmax(0, .x))) %>%
+    filter(thresh < .2) %>%
+    ggplot(aes(thresh, FAIm)) +
+    geom_col(fill = "deepskyblue", alpha = .5, color = "black", size = .25) +
+    geom_linerange(aes(ymin = lwr, ymax = upr)) +
+    scale_x_continuous(labels = scales::label_percent()) +
+    scale_y_continuous(labels = function(x){paste0(x, "%")}) +
+    facet_wrap(~sex, nrow = 1) +
+    labs(x = "MACE probability\n(SCORE2 only)", 
+         y = "Fraction of\nadditional explained\nvariation in\nMACE by PRSs\n95% CI") +
+    theme_bw() +
+    theme(axis.title.y = element_text(size = 7, angle = 0, vjust = .5),
+          axis.title.x = element_text(size = 7),
+          axis.text = element_text(size = 6))
+faig
+```
+
+```{r}
+predvals <- ppdat %>%
+    mutate(
+        sex,
+        Data = map(Data, mutate, outcome_value = 0, outcome_timeyrs = 10),
+        across(c(modscore2, modprscore2), 
+               ~map2(.x, Data, \(MOD, X) 1 - survival:::predict.coxph(MOD, X, type = "survival")))
+    ) %>%
+    select(sex, modscore2, modprscore2) %>%
+    unnest(c(modscore2, modprscore2))
+head(predvals)
+```
+
+```{r}
+options(repr.plot.width = 5, repr.plot.height = 3)
+diffpredg <- predvals %>%
+    drop_na %>%
+    ggplot(aes(modscore2, modprscore2 - modscore2)) +
+    geom_hex(bins = 1e3, show.legend = FALSE) +
+    ggdensity::geom_hdr() +
+    geom_hline(yintercept = 0, color = "red", size = .25) +
+    geom_hline(yintercept = .01, color = "red", size = .1, lty = "dashed") +
+    geom_hline(yintercept = -.01, color = "red", size = .1, lty = "dashed") +
+    scale_x_continuous(labels = scales::label_percent()) +
+    scale_y_continuous(labels = scales::label_percent()) +
+    facet_wrap(~sex, nrow = 1) +
+    labs(x = "Pretest probability",
+         y = "Difference\nSCORE2+PRSs - SCORE2\nprobability", 
+         alpha = "Fraction of\nindividuals") +
+    theme_bw() +
+    theme(legend.position = "top", 
+          legend.text = element_text(size = 5),
+          legend.title = element_text(size = 6),
+          axis.title.y = element_text(size = 7, angle = 0, vjust = .5),
+          axis.title.x = element_text(size = 7),
+          axis.text = element_text(size = 6))
+diffpredg
+```
+
+```{r}
+options(repr.plot.width = 5, repr.plot.height = 5)
+patchwork::wrap_plots(
+    diffpredg + geom_vline(xintercept = 0) + coord_cartesian(xlim = c(-0.02, 0.17)) + theme(axis.title.x = element_blank()), 
+    faig + coord_cartesian(xlim = c(-0.02, 0.17)), 
+    ncol = 1, guides = "collect"
+) & 
+    theme(legend.position = "top")
+```
+
+```{r}
+predvalsall <- ppdat %>%
+    mutate(
+        sex,
+        Data = map(Data, mutate, outcome_value = 0, outcome_timeyrs = 10),
+        across(c(modscore2, modprscore2), 
+               ~map2(.x, Data, \(MOD, X) 1 - survival:::predict.coxph(MOD, X, type = "survival")))
+    ) %>%
+    select(sex, Data, modscore2, modprscore2) %>%
+    unnest(c(Data, modscore2, modprscore2)) %>%
+    transmute(
+        sex, eid,
+        Concordant, Discordant,
+        age, sbp, tchol, hdl, hba1c, egfr = exp(lnegfr),
+        modscore2, modprscore2,
+        DIF = modprscore2 - modscore2
+    )
+head(predvalsall)
+```
+
+```{r}
+predvalsall_long <- predvalsall %>%
+    pivot_longer(
+        -c(sex, eid, modscore2, modprscore2, DIF)
+    )
+head(predvalsall_long)
+```
+
+```{r}
+options(repr.plot.width = 6, repr.plot.height = 6)
+predvalsall_long %>%
+    mutate(value = ifelse(name == "hba1c" & value > 100, NaN, value)) %>%
+    drop_na %>%
+    ggplot(aes(value, DIF)) +
+    geom_hex(bins = 100, show.legend = FALSE) +
+    geom_hline(yintercept = .01, color = "red", size = .25, lty = "dashed") +
+    geom_hline(yintercept = -.01, color = "red", size = .25, lty = "dashed") +
+    scale_y_continuous(labels = scales::label_percent()) +
+    ggh4x::facet_nested_wrap(~name + sex, scales = "free_x", ncol = 4) +
+    labs(x = NULL, y = "Difference\nPost - Pretest\nprobability") +
+    theme_bw() +
+    theme(axis.title.y = element_text(size = 7, angle = 0, vjust = .5),
+          axis.title.x = element_text(size = 7),
+          axis.text = element_text(size = 6),
+          strip.text = element_text(size = 5))
+```
+
+## Likelihoods at different ages
+
+```{r}
+FAIperAge <- bootdat %>%
+    mutate(
+        Data = map(Data, mutate, agestrat = cut(age, c(-Inf, 50, 60, Inf))),
+        Data = map(Data, nest, ByAge = -agestrat)
+    ) %>%
+    unnest(Data) %>%
+    mutate(
+        modnull = map(
+            ByAge,
+            ~survival::coxph(
+                survival::Surv(time = outcome_timeyrs, event = outcome_value) ~ 1,
+                data = .x
+            )
+        ),
+        across(
+            c(modscore2, modprscore2),
+            ~map2(
+                .x, ByAge,
+                function(MOD, DAT){
+                    survival::coxph(
+                        formula = formula(MOD),
+                        data = DAT,
+                        init = coef(MOD),
+                        control = survival::coxph.control(iter.max = 0)
+                    )
+                }
+            )
+        ),
+        across(c(modnull, modscore2, modprscore2), ~map_dbl(.x, logLik)),
+        across(c(modscore2, modprscore2), ~abs(.x - modnull)),
+        FAI = 100 * (1 - (modscore2 / modprscore2))
+    ) %>%
+    group_by(sex, agestrat) %>%
+    summarise(
+        FAIm = median(FAI),
+        lwr = quantile(FAI, probs = .025),
+        upr = quantile(FAI, probs = .975)
+    )
+print(FAIperAge)
+```
+
+```{r}
+FAIperAge
+```
+
+## Calibration
+
+```{r}
+datpred <- ppdat %>%
+    transmute(
+        sex,
+        Data = pmap(
+            list(Data, modscore2, modprscore2),
+            function(X, MODBASE, MODPRS){
+                NewX <- X
+                NewX$outcome_timeyrs <- 10
+                X$predbase <- 1 - predict(MODBASE, NewX, type = "survival")
+                X$predprs <- 1 - predict(MODPRS, NewX, type = "survival")
+                return(X)
+            }
+        )
+    )
+print(datpred)
+```
+
+```{r}
+calibdat <- datpred %>%
+    mutate(
+        Data = map(Data, pivot_longer, cols = c(predbase, predprs), names_to = "predcalc"),
+        Data = map(Data, mutate, value = cut(value, c(-Inf, .05, .1, .15, .2, .3, .5, Inf),
+                                             labels = c(.025, .075, .125, .175, .25, .4, median(value[value > .5])))),
+        Data = map(Data, nest, ByPred = -c(predcalc, value))
+    ) %>%
+    unnest(Data) %>%
+    mutate(
+        ByPred = map(
+            ByPred, 
+            ~survival::survfit(
+                survival::Surv(
+                    time = outcome_timeyrs, event = outcome_value
+                ) ~ 1,
+                data = .x
+            )
+        ),
+        ByPred = map(ByPred, summary, times = 10),
+        ByPred = map(
+            ByPred, 
+            ~tibble(
+                Risk = 1 - .x$surv,
+                Lower = 1 - .x$upper,
+                Upper = 1 - .x$lower
+            )
+        )
+    ) %>%
+    unnest(ByPred) %>%
+    mutate(value = as.numeric(as.character(value)))
+head(calibdat)
+```
+
+```{r}
+options(repr.plot.height = 4, repr.plot.width = 4)
+calibdat %>%    
+    mutate(
+        predcalc = case_match(
+            predcalc, 
+            "predbase" ~ "SCORE2", 
+            "predprs" ~ "SCORE2+PRSs"
+        )
+    ) %>%
+    ggplot(aes(value, Risk)) +
+    geom_abline(intercept = 0, slope = 1, lty = "dashed") +
+    geom_line() +
+    geom_linerange(aes(ymin = Lower, ymax = Upper)) +
+    geom_point() +
+    scale_x_continuous(labels = \(x)100*x) +
+    scale_y_continuous(labels = \(x)100*x) +
+    facet_grid(predcalc ~ sex) +
+    labs(x = "Predicted risk (%)", y = "Observed risk (%)") +
+    theme_bw()
+```
+
+## Reclassification
+
+```{r}
+reclasdat <- datpred %>%
+    mutate(
+        Data = map(
+            Data,
+            mutate,
+            across(
+                c(predbase, predprs),
+                \(x){
+                    case_when(
+                        x < .05  ~ 1,
+                        x >= .05 & x < .1 ~ 2,
+                        x >= .1 & x < .15 ~ 3,
+                        x >= .15 ~ 4
+                    )
+                }
+            )
+        ),
+        Data = map(Data, nest, ByPred = -c(predbase, predprs))
+    ) %>%
+    unnest(Data) %>%
+    mutate(         
+        N = map_dbl(ByPred, nrow),
+        Nevent = map_dbl(ByPred, ~sum(.x$outcome_value)),
+        move = case_when(
+            predprs > predbase ~ "mvup",
+            predprs < predbase ~ "mvdn",
+            TRUE ~ "eq"
+        ),
+        EstRiskD = map(
+            ByPred,
+            ~{
+                SF <- survival::survfit(
+                    survival::Surv(time = outcome_timeyrs, event = outcome_value) ~ 1,
+                    data = .x
+                )
+                SFS <- summary(SF, times = 10)
+                tibble(
+                    EstRisk = 1 - SFS$surv,
+                    Lower = 1 - SFS$upper,
+                    Upper = 1 - SFS$lower
+                )
+            }
+        )
+    ) %>%
+    #select(-ByPred) %>%
+    unnest(EstRiskD) %>%
+    arrange(sex, move)
+print(reclasdat)
+```
+
+```{r}
+reclasdat %>%
+    group_by(sex, move) %>%
+    summarise(sumN = sum(N), .groups = "drop_last") %>%
+    mutate(perc = sumN/sum(sumN))
+```
+
+```{r}
+reclasdat %>%
+    group_by(sex, move) %>%
+    summarise(sumN = sum(N), .groups = "drop_last") %>%
+    mutate(perc = sumN/sum(sumN)) %>%
+    filter(move != "eq") %>%
+    group_by(sex) %>%
+    summarise(across(c(sumN, perc), sum))
+```
+
+```{r}
+options(repr.plot.width = 3.5, repr.plot.height = 5)
+reclasp1 <- reclasdat %>%
+    mutate(
+        across(c(EstRisk, Lower, Upper), ~100*.x),
+        across(
+            c(predprs, predbase),
+            \(x){
+                factor(
+                    x,
+                    levels = 1:4,
+                    labels = c("<5", "5-10", "10-15", ">15")
+                )
+            }
+        )
+    ) %>%
+    ggplot(aes(EstRisk, interaction(predprs, predbase, sep = "|"))) +
+    geom_rect(aes(ymin = -Inf, ymax = Inf, xmin = -Inf, xmax = 5), fill = "green", alpha = .05) +
+    geom_rect(aes(ymin = -Inf, ymax = Inf, xmin = 5, xmax = 10), fill = "yellow", alpha = .05) +
+    geom_rect(aes(ymin = -Inf, ymax = Inf, xmin = 10, xmax = 15), fill = "red", alpha = .05) +
+    geom_rect(aes(ymin = -Inf, ymax = Inf, xmin = 15, xmax = Inf), fill = "darkred", alpha = .05) +
+    geom_linerange(aes(xmin = Lower, xmax = Upper)) +
+    geom_point(aes(shape = move), fill = "black") +
+    scale_shape_manual(
+        labels = c(eq = "Equal", mvup = "Up", mvdn = "Down"),
+        values = c(eq = 21, mvup = 24, mvdn = 25),
+    ) +
+    scale_y_discrete(guide = ggh4x::guide_axis_nested(delim = "|")) +
+    facet_wrap(~sex, ncol = 1) +
+    theme_bw() +
+    labs(
+        y = "Predicted risk categories (%)", 
+        x = "Observed risk (%)\n95% CI",
+        shape = "Reclassification"
+    ) +
+    theme(
+        axis.title.y = element_text(size = 7),
+        axis.title.x = element_text(size = 7),
+        axis.text = element_text(size = 6),
+        legend.position = "top",
+        legend.box = "vertical",
+        legend.margin = margin(),
+        legend.justification = c("left", "top"),
+        legend.box.just = "left",
+        legend.box.spacing = unit(0, "cm"),
+        legend.spacing = unit(0, "cm"),
+        legend.title = element_text(size = 7),
+        legend.text = element_text(size = 6),
+    )
+reclasp1
+```
+
+```{r}
+reclasp2 <- reclasdat %>%
+    unnest(ByPred) %>%
+    ggplot(aes(age, interaction(predprs, predbase, sep = "|"))) +
+    geom_boxplot(aes(group = interaction(predprs, predbase, sep = "|")), outlier.shape = NA) +
+    facet_wrap(~sex, ncol = 1) +
+    labs(x = "Age") +
+    theme_minimal() +
+    theme(
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.line.x = element_line(),
+        axis.ticks.x = element_line(),
+        strip.background = element_blank(),
+        strip.text = element_text(color = NA),
+    )
+reclasp2
+```
+
+```{r}
+reclasp3 <- reclasdat %>%
+    ggplot(aes("N", interaction(predprs, predbase, sep = "|"))) +
+    geom_text(aes(label = scales::comma(N)), size = 2, hjust = 0, nudge_x = -10) +
+    facet_wrap(~sex, ncol = 1) +
+    labs(x = "N") +
+    theme(
+        axis.title.x = element_text(hjust = .025),
+        axis.title.y = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.background = element_blank(),
+        strip.background = element_blank(),
+        strip.text = element_text(color = NA),
+    )
+reclasp3
+```
+
+```{r}
+reclasp <- patchwork::wrap_plots(
+    patchwork::guide_area(), patchwork::plot_spacer(), patchwork::plot_spacer(),
+    reclasp1 +
+        patchwork::inset_element(
+            grid::textGrob(
+                label = "SCORE2", 
+                just = "right",
+                rot = 90,
+                gp = grid::gpar(fontsize = 5)
+            ),
+            left = 0.11, right = 0.11,
+            bottom = 0.075, top = 0.075,
+            align_to = "full",
+            clip = FALSE
+        ) +
+        patchwork::inset_element(
+            grid::textGrob(
+                label = "SCORE2+\nPRSs",
+                just = "right",
+                rot = 90,
+                gp = grid::gpar(fontsize = 5)
+            ),
+            left = 0.21, right = 0.21,
+            bottom = 0.075, top = 0.075,
+            align_to = "full",
+            clip = FALSE
+        ),
+    reclasp2,
+    reclasp3,
+    ncol = 3, nrow = 2, 
+    widths = c(.75, .25, .25),
+    heights = c(.01, .99),
+    guides = "collect"
+)
+reclasp
+```
+
+```{r}
+NRIfx <- function(time, event, pold, pnew){
+    Pevent <- 1 - summary(
+        survival::survfit(
+            survival::Surv(time, event) ~ 1
+        ),
+        times = 10
+    )$surv
+    mv <- case_when(
+        pnew > pold ~ "up",
+        pnew < pold ~ "dn",
+        TRUE ~ "eq"
+    )
+    Pup <- sum(mv == "up")/length(time)
+    Pdn <- sum(mv == "dn")/length(time)
+    Pevup <- 1 - summary(
+        survival::survfit(
+            survival::Surv(time[mv == "up"], event[mv == "up"]) ~ 1
+        ),
+        times = 10
+    )$surv
+    Pevdn <- 1 - summary(
+        survival::survfit(
+            survival::Surv(time[mv == "dn"], event[mv == "dn"]) ~ 1
+        ),
+        times = 10
+    )$surv
+    NRIeve <- ((Pevup * Pup) - (Pevdn * Pdn)) / Pevent
+    NRInev <- (((1 - Pevdn) * Pdn) - ((1 - Pevup) * Pup)) / (1 - Pevent)
+    tibble(
+        term = c(
+            "Pevent", "Pup", "Pdn", "Pevup", "Pevdn", "NRIeve", "NRInev", "NRI"
+        ), 
+        value = c(
+            Pevent, Pup, Pdn, Pevup, Pevdn, NRIeve, NRInev,
+            NRI = NRIeve + NRInev
+        )
+    )
+}
+```
+
+```{r}
+nrires <- datpred %>%
+    mutate(
+        Data = map(
+            Data,
+            ~NRIfx(
+                .x$outcome_timeyrs, .x$outcome_value, 
+                .x$predbase, .x$predprs
+            )
+        )
+    ) %>%
+    unnest(Data)
+nrires
+```
+
+```{r}
+nrici <- datpred %>%
+    expand_grid(bootn = 1:100) %>%
+    mutate(
+        Data = map2(
+            bootn, Data,
+            ~{
+                set.seed(.x)
+                ivec <- sample(1:nrow(.y), nrow(.y), replace=TRUE)
+                .y[ivec,]
+            }
+        ),
+        Data = map(
+            Data,
+            ~NRIfx(
+                .x$outcome_timeyrs, .x$outcome_value, 
+                .x$predbase, .x$predprs
+            )
+        )
+    ) %>%
+    unnest(Data)
+head(nrici)
+```
+
+```{r}
+nricires <- nrici %>%
+    group_by(sex, term) %>%
+    summarise(
+        ci = list(data.frame(t(quantile(value, c(0.025, 0.975))))),
+        .groups = "drop"
+    ) %>%
+    unnest(ci)
+nricires
+```
+
+```{r}
+nrif <- inner_join(nrires, nricires)
+nrif
+```
+
+```{r}
+nricatres <- datpred %>%
+    mutate(
+        Data = map(
+            Data,
+            mutate,
+            across(
+                c(predbase, predprs),
+                \(x){
+                    case_when(
+                        age < 50 & x < .025  ~ 1,
+                        age < 50 & x >= .025 & x < 0.075 ~ 2,
+                        age < 50 & x >= .075 ~ 3,
+                        age >= 50 & age < 70 & x < 0.05 ~ 1,
+                        age >= 50 & age < 70 & x >= 0.05 & x < .1 ~ 2,
+                        age >= 50 & age < 70 & x >= 0.1 ~ 3,
+                        age >= 70 & x < 0.075 ~ 1,
+                        age >= 70 & x >= 0.075 & x < .15 ~ 2,
+                        age >= 70 & x >= .15 ~ 3
+                    )
+                }
+            )
+        ),
+        Data = map(
+            Data,
+            ~NRIfx(
+                .x$outcome_timeyrs, .x$outcome_value, 
+                .x$predbase, .x$predprs
+            )
+        )
+    ) %>%
+    unnest(Data)
+nricatres
+```
+
+## In T2D
+
+### FAI
+
+```{r}
+FAIperT2D <- bootdat %>%
+    mutate(
+        Data = map(Data, split, f = ~T2D)
+    ) %>%
+    unnest(Data) %>%
+    transmute(
+        sex, bootn,
+        T2Dstatus = map_dbl(Data, ~unique(.x$T2D)),
+        modnull = map(
+            Data,
+            ~survival::coxph(
+                survival::Surv(time = outcome_timeyrs, event = outcome_value) ~ 1,
+                data = .x
+            )
+        ),
+        across(
+            c(modscore2, modprscore2),
+            ~map2(
+                .x, Data,
+                function(MOD, DAT){
+                    survival::coxph(
+                        formula = formula(MOD),
+                        data = DAT,
+                        init = coef(MOD),
+                        control = survival::coxph.control(iter.max = 0)
+                    )
+                }
+            )
+        ),
+        across(c(modnull, modscore2, modprscore2), ~map_dbl(.x, logLik)),
+        across(c(modscore2, modprscore2), ~abs(.x - modnull)),
+        FAI = 100 * (1 - (modscore2 / modprscore2))
+    ) %>%
+    group_by(sex, T2Dstatus) %>%
+    summarise(
+        FAIm = median(FAI),
+        lwr = quantile(FAI, probs = .025),
+        upr = quantile(FAI, probs = .975)
+    )
+FAIperT2D
+```
+
+### Net reclassification
+
+```{r}
+reclasdat_t2d <- datpred %>%
+    mutate(
+        Data = map(Data, filter, T2D == 1),
+        Data = map(
+            Data,
+            mutate,
+            across(
+                c(predbase, predprs),
+                \(x){ 
+                    cut(
+                        x, 
+                        breaks = c(-Inf, .05, .1, .15, Inf),
+                        labels = c("<5", "5-10", "10-15", ">15")
+                    ) 
+                }
+            )
+        ),
+        Data = map(Data, nest, ByPred = -c(predbase, predprs))
+    ) %>%
+    unnest(Data) %>%
+    mutate(         
+        N = map_dbl(ByPred, nrow),
+        Nevent = map_dbl(ByPred, ~sum(.x$outcome_value)),
+        move = case_when(
+            as.numeric(predprs) > as.numeric(predbase) ~ "mvup",
+            as.numeric(predprs) < as.numeric(predbase) ~ "mvdn",
+            TRUE ~ "eq"
+        ),
+        EstRiskD = map(
+            ByPred,
+            ~{
+                SF <- survival::survfit(
+                    survival::Surv(time = outcome_timeyrs, event = outcome_value) ~ 1,
+                    data = .x
+                )
+                SFS <- summary(SF, times = 10)
+                tibble(
+                    EstRisk = 1 - SFS$surv,
+                    Lower = 1 - SFS$upper,
+                    Upper = 1 - SFS$lower
+                )
+            }
+        )
+    ) %>%
+    select(-ByPred) %>%
+    unnest(EstRiskD) %>%
+    arrange(sex, move)
+reclasdat_t2d
+```
+
+```{r}
+reclasdat_t2d %>%
+    group_by(sex, move) %>%
+    summarise(sumN = sum(N), .groups = "drop_last") %>%
+    mutate(perc = sumN/sum(sumN))
+```
+
+```{r}
+options(repr.plot.width = 6, repr.plot.height = 4)
+reclasp1_t2d <- reclasdat_t2d %>%
+    mutate(across(c(EstRisk, Lower, Upper), ~100*.x)) %>%
+    ggplot(aes(EstRisk, interaction(predprs, predbase, sep = "|"))) +
+    geom_rect(aes(ymin = -Inf, ymax = Inf, xmin = -Inf, xmax = 5), fill = "green", alpha = .05) +
+    geom_rect(aes(ymin = -Inf, ymax = Inf, xmin = 5, xmax = 10), fill = "yellow", alpha = .05) +
+    geom_rect(aes(ymin = -Inf, ymax = Inf, xmin = 10, xmax = 15), fill = "red", alpha = .05) +
+    geom_rect(aes(ymin = -Inf, ymax = Inf, xmin = 15, xmax = Inf), fill = "darkred", alpha = .05) +
+    geom_linerange(aes(xmin = Lower, xmax = Upper)) +
+    geom_point(aes(shape = move), fill = "black", show.legend = FALSE) +
+    scale_shape_manual(values = c(eq = 21, mvup = 24, mvdn = 25)) +
+    scale_y_discrete(guide = ggh4x::guide_axis_nested(delim = "|")) +
+    facet_wrap(~sex, ncol = 1) +
+    theme_bw() +
+    labs(y = "Predicted risk (%)\n\nSCORE2 | SCORE2+PRS", x = "Observed risk (%)") +
+    theme(
+        axis.title.y = element_text(angle = 0, size = 7, vjust = .5),
+        axis.title.x = element_text(size = 7),
+        axis.text = element_text(size = 6)
+    ) +
+    coord_cartesian(xlim = c(0, 30))
+reclasp2_t2d <- reclasdat_t2d %>%
+    ggplot(aes("N", interaction(predprs, predbase, sep = "|"))) +
+    geom_text(aes(label = scales::comma(N)), size = 2, hjust = 0, nudge_x = -1) +
+    facet_wrap(~sex, ncol = 1) +
+    theme(
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.background = element_blank(),
+        strip.background = element_blank(),
+        strip.text = element_text(color = NA),
+    )
+patchwork::wrap_plots(reclasp1_t2d, reclasp2_t2d, nrow = 1)
+```
+
+```{r}
+nrires_t2d <- datpred %>%
+    mutate(
+        Data = map(Data, filter, T2D == 1),
+        Data = map(
+            Data,
+            ~NRIcont(
+                .x$outcome_timeyrs, .x$outcome_value, 
+                .x$predbase, .x$predprs
+            )
+        )
+    ) %>%
+    unnest(Data)
+nrires_t2d
+```
+
+```{r}
+nrici_t2d <- datpred %>%
+    mutate(Data = map(Data, filter, T2D == 1)) %>%
+    expand_grid(bootn = 1:100) %>%
+    mutate(
+        Data = map2(
+            bootn, Data,
+            ~{
+                set.seed(.x)
+                ivec <- sample(1:nrow(.y), nrow(.y), replace=TRUE)
+                .y[ivec,]
+            }
+        ),
+        Data = map(
+            Data,
+            ~NRIcont(
+                .x$outcome_timeyrs, .x$outcome_value, 
+                .x$predbase, .x$predprs
+            )
+        )
+    ) %>%
+    unnest(Data)
+head(nrici_t2d)
+```
+
+```{r}
+nricires_t2d <- nrici_t2d %>%
+    group_by(sex, term) %>%
+    summarise(
+        ci = list(data.frame(t(quantile(value, c(0.025, 0.975))))),
+        .groups = "drop"
+    ) %>%
+    unnest(ci)
+nricires_t2d
+```
+
+```{r}
+nrif_t2d <- inner_join(nrires_t2d, nricires_t2d)
+nrif_t2d
+```
+
+## Decision curve analysis
+
+Overall:
+
+```{r}
+dres <- ppdat %>%
+    transmute(
+        sex,
+        Data = pmap(
+            list(Data, modscore2, modprscore2),
+            function(X, MODBASE, MODPRS){
+                NewX <- X
+                NewX$outcome_timeyrs <- 10
+                X$predbase <- 1 - predict(MODBASE, NewX, type = "survival")
+                X$predprs <- 1 - predict(MODPRS, NewX, type = "survival")
+                return(X)
+            }
+        ),
+        Data = map(
+            Data,
+            ~dcurves::dca(
+                formula = survival::Surv(time = outcome_timeyrs, event = outcome_value) ~ 
+                predbase + predprs,
+                data = .x,
+                time = 10,
+                thresholds = seq(0, .3, .01)
+            )
+        ),
+        Data = map(Data, dcurves::net_intervention_avoided)
+    )
+print(dres)
+```
+
+```{r}
+options(repr.plot.width = 10, repr.plot.height = 10)
+dres %>%
+    mutate(
+        Data = map(Data, "dca"),
+        Data = map2(
+            Data, sex,
+            ~{
+                g1 <- .x %>%
+                    ggplot(aes(threshold, net_benefit)) +
+                    geom_line(aes(group = variable, color = variable)) +
+                    coord_cartesian(ylim = c(-0.001, max(.x$net_benefit)))
+                g2 <- .x %>%
+                    ggplot(aes(threshold, net_intervention_avoided)) +
+                    geom_line(aes(group = variable, color = variable), na.rm = TRUE) +
+                    coord_cartesian(ylim = c(-0.001, max(.x$net_intervention_avoided)))
+                patchwork::wrap_plots(g1, g2, guides = "collect") +
+                    patchwork::plot_annotation(title = .y) &
+                    theme_bw()
+            }
+        ),
+        Data = map(Data, patchwork::wrap_elements)
+    ) %>%
+    pull(Data) %>%
+    patchwork::wrap_plots(ncol = 1)
+```
+
+In patients with T2D:
+
+```{r}
+dres_t2d <- ppdat %>%
+    transmute(
+        sex,
+        Data = pmap(
+            list(Data, modscore2, modprscore2),
+            function(X, MODBASE, MODPRS){
+                NewX <- X
+                NewX$outcome_timeyrs <- 10
+                X$predbase <- 1 - predict(MODBASE, NewX, type = "survival")
+                X$predprs <- 1 - predict(MODPRS, NewX, type = "survival")
+                X <- X[X$T2D == 1,]
+                return(X)
+            }
+        ),
+        Data = map(
+            Data,
+            ~dcurves::dca(
+                formula = survival::Surv(time = outcome_timeyrs, event = outcome_value) ~ 
+                predbase + predprs,
+                data = .x,
+                time = 10,
+                thresholds = seq(0, .2, .01)
+            )
+        ),
+        Data = map(Data, dcurves::net_intervention_avoided)
+    )
+print(dres_t2d)
+```
+
+```{r}
+dres_t2d %>%
+    mutate(
+        Data = map(Data, "dca"),
+        Data = map2(
+            Data, sex,
+            ~{
+                g1 <- .x %>%
+                    ggplot(aes(threshold, net_benefit)) +
+                    geom_line(aes(group = variable, color = variable)) +
+                    coord_cartesian(ylim = c(-0.001, max(.x$net_benefit)))
+                g2 <- .x %>%
+                    ggplot(aes(threshold, net_intervention_avoided)) +
+                    geom_line(aes(group = variable, color = variable), na.rm = TRUE) +
+                    coord_cartesian(ylim = c(-0.001, max(.x$net_intervention_avoided)))
+                patchwork::wrap_plots(g1, g2, guides = "collect") +
+                    patchwork::plot_annotation(title = .y) &
+                    theme_bw()
+            }
+        ),
+        Data = map(Data, patchwork::wrap_elements)
+    ) %>%
+    pull(Data) %>%
+    patchwork::wrap_plots(ncol = 1)
+```
+
+## Does the associations change with diabetes diagnosis?
+
+```{r}
+ppdat <- ppdat %>%
+    mutate(
+        modprscore2byt2d = map(
+            Data,
+            ~survival::coxph(
+                reformulate(
+                    termlabels = c(". - eid", paste("T2D", c("Concordant", "Discordant"), sep = ":")),
+                    response = "survival::Surv(time = outcome_timeyrs, event = outcome_value)"
+                ),
+                data = .x
+            )
+        )
+    )
+print(ppdat)
+```
+
+```{r}
+ialrtres <- ppdat %>%
+    transmute(
+        sex,
+        across(
+            c(modnull, modprscore2, modprscore2byt2d),
+            ~map_dbl(.x, logLik),
+            .names = "LL{.col}"
+        ),
+        across(starts_with("LL"), ~2*abs(.x - LLmodnull),
+               .names = "LR{.col}"),
+        across(
+            c(modprscore2, modprscore2byt2d),
+            ~map_dbl(.x, \(MOD) sum(!is.na(MOD$coefficients))),
+            .names = "NV{.col}"
+        ),
+        LRTp = pchisq(
+            q = 2 * abs(LLmodprscore2byt2d - LLmodprscore2),
+            df = NVmodprscore2byt2d - NVmodprscore2,
+            lower.tail = FALSE
+        ),
+        FAI = 100 * (1 - (LRLLmodprscore2 / LRLLmodprscore2byt2d)),
+        across(
+            c(modprscore2, modprscore2byt2d),
+            ~map_dbl(.x, \(MOD) extractAIC(MOD)[2]),
+            .names = "AIC{.col}"
+        ),
+    )
+ialrtres
+```
+
+```{r}
+score2prsbyt2dres <- ppdat %>%
+    transmute(
+        sex,
+        modres = map(modprscore2byt2d, broom::tidy, conf.int = TRUE)
+    ) %>%
+    unnest(modres) %>%
+    filter(
+        term == "T2D"|
+        term %in% c("Concordant", "Discordant")|
+        grepl(":", term)
+    )
+score2prsbyt2dres
+```
+
+### HR per allele by T2D strata
+
+```{r}
+condestbyt2d <- ppdat %>%
+    transmute(
+        sex, 
+        modprscore2byt2d = map(
+            modprscore2byt2d,
+            function(MODEL){
+                map(
+                    c("Concordant", "Discordant"),
+                    function(PROFILE){
+                        RES1 <- data.frame(
+                            Profile = PROFILE,
+                            Subset = "Without T2D",
+                            Estimate = coef(MODEL)[PROFILE],
+                            SE = sqrt(drop(vcov(MODEL)[PROFILE, PROFILE]))
+                        )
+                        TERMS <- c(PROFILE, paste("T2D", PROFILE, sep = ":"))
+                        RES2 <- data.frame(
+                            Profile = PROFILE,
+                            Subset = "With T2D",
+                            Estimate = sum(coef(MODEL)[TERMS]),
+                            SE = sqrt(drop(c(1,1) %*% vcov(MODEL)[TERMS, TERMS] %*% c(1,1)))
+                        )
+                        bind_rows(RES1, RES2)
+                    }
+                ) %>%
+                bind_rows
+            }
+        )
+    ) %>%
+    unnest(modprscore2byt2d) %>%
+    mutate(
+        Lower = Estimate - (qnorm(1 - (.05/2)) * SE),
+        Upper = Estimate + (qnorm(1 - (.05/2)) * SE),
+        Pval = 2*pnorm(-abs(Estimate/SE)),
+        across(c(Estimate, Lower, Upper), exp),
+        SE = NULL
+    )
+condestbyt2d
+```
+
+```{r}
+options(repr.plot.width = 5, repr.plot.height = 2)
+condestbyt2d %>%
+    ggplot(aes(Estimate, interaction(Subset, Profile))) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(
+        aes(xmin = Lower, xmax = Upper)
+    ) +
+    geom_point() +
+    facet_wrap(~sex) +
+    scale_y_discrete(guide = ggh4x::guide_axis_nested()) +
+    theme_bw() +
+    labs(
+        x = "HR per allele (95% CI)",
+        y = NULL
+    )
+```
+
+### HR of T2D by PRS deciles
+
+```{r}
+options(repr.plot.width = 5, repr.plot.height = 3)
+ppdat %>%
+    transmute(
+        sex,
+        riskt2d = map2(
+            Data, modprscore2byt2d,
+            function(DAT, FIT){
+                map(
+                    c("Concordant", "Discordant"),
+                    function(PROFILE){
+                        PRSDAT <- DAT[[PROFILE]]
+                        QPRS <- quantile(PRSDAT, probs = c(.1, .5, .9))
+                        map(
+                            QPRS,
+                            function(QP){
+                                xa <- xb <- FIT$means
+                                xa[PROFILE] <- xb[PROFILE] <- QP
+                                xa["T2D"] <- 1
+                                xa["age_T2D"] <- xa["age"]
+                                X <- model.matrix(
+                                    FIT, 
+                                    data = data.frame(
+                                        eid = 1, 
+                                        outcome_value = 0, outcome_timeyrs = 10, 
+                                        rbind(t(xa), t(-xb))
+                                    )
+                                )
+                                Xd <- colSums(X)
+                                tibble(
+                                    Profile = PROFILE,
+                                    PRSValue = QP,
+                                    beta = drop(t(Xd) %*% coef(FIT)),
+                                    se = sqrt(drop(Xd %*% vcov(FIT) %*% Xd))
+                                )
+                            }
+                        ) %>%
+                        bind_rows(.id = "Decile")
+                    }
+                ) %>%
+                bind_rows
+            }
+        )
+    ) %>%
+    unnest(riskt2d) %>%
+    mutate(
+        lower = beta - qnorm(1 - .05/2)*se,
+        upper = beta + qnorm(1 - .05/2)*se,
+        pval = 2*pnorm(-abs(beta/se)),
+        across(c(beta, lower, upper), exp),
+        across(c(beta, lower, upper), ~round(.x, digits = 3)),
+        se = NULL
+    ) %>%
+    ggplot(aes(beta, interaction(Decile, Profile))) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = lower, xmax = upper)) +
+    geom_point() +
+    scale_y_discrete(guide = ggh4x::guide_axis_nested()) +
+    facet_wrap(~sex) +
+    labs(x = "HR (95% CI)", y = NULL, title = "HR of MACE attributed\nto T2D by PRS deciles") +
+    theme_bw()
+```
+
+### Risk by PRS extremes and T2D strata
+
+```{r}
+iapred <- ppdat %>%
+    transmute(
+        sex,
+        riskt2d = map2(
+            Data, modprscore2byt2d,
+            function(DAT, FIT){
+                AveDat <- FIT$mean
+                CovarNm <- names(AveDat)
+                CovarNm <- CovarNm[!grepl("Concordant|Discordant|T2D", CovarNm)]
+                AveDat <- AveDat[CovarNm]
+                ConcPRS <- DAT[["Concordant"]]
+                DiscPRS <- DAT[["Discordant"]]
+                NewDat <- tribble(
+                    ~eid, ~Concordant, ~Discordant,
+                    #"Conc", quantile(ConcPRS, probs = .99), quantile(DiscPRS, probs = .01),
+                    "Conc", max(ConcPRS), min(DiscPRS),
+                    "Ave", quantile(ConcPRS, probs = .5), quantile(DiscPRS, probs = .5),
+                    #"Disc", quantile(ConcPRS, probs = .01), quantile(DiscPRS, probs = .99)
+                    "Disc", min(ConcPRS), max(DiscPRS),
+                ) %>%
+                    bind_cols(data.frame(t(AveDat))) %>%
+                    expand_grid(T2D = 0:1) %>%
+                    mutate(
+                        outcome_value = 0, outcome_timeyrs = 10,
+                        age_T2D = age*T2D, T2Dage = 0
+                    )
+                RES <- data.frame(predict(FIT, NewDat, type = "survival", se.fit = TRUE))
+                transmute(NewDat, eid, T2D) %>% bind_cols(RES)
+            }
+        )
+    ) %>%
+    unnest(riskt2d) %>%
+    mutate(
+        lower = fit + qnorm(1 - .05/2)*se.fit,
+        upper = fit - qnorm(1 - .05/2)*se.fit,
+        se.fit = NULL,
+        across(c(fit, lower, upper), ~1-.x)
+    )
+iapred
+```
+
+```{r}
+iapredhr <- ppdat %>%
+    transmute(
+        sex,
+        hrest = map2(
+            Data, modprscore2byt2d,
+            function(DAT, FIT){
+                ConcPRS <- DAT[["Concordant"]]
+                DiscPRS <- DAT[["Discordant"]]
+                termstouse <- c("T2D", "age_T2D", "T2D:Concordant", "T2D:Discordant")
+                mat <- rbind(
+                    "Conc" = c(1, FIT$mean["age"], max(ConcPRS), min(DiscPRS)),
+                    "Aver" = c(1, FIT$mean["age"], median(ConcPRS), median(DiscPRS)),
+                    "Disc" = c(1, FIT$mean["age"], min(ConcPRS), max(DiscPRS))
+                )
+                tibble(
+                    eid = rownames(mat),
+                    estimate = colSums(t(mat)*coef(FIT)[termstouse]),
+                    se = apply(
+                        mat, 1, 
+                        \(x) sqrt(drop(x %*% vcov(FIT)[termstouse, termstouse] %*% x))
+                    )
+                )
+            }
+        )
+    ) %>%
+    unnest(hrest) %>%
+    mutate(
+        pval = 2 * pnorm(-abs(estimate/se)),
+        hr = exp(estimate),
+        lwr = exp(estimate - qnorm(.975)*se),
+        upr = exp(estimate + qnorm(.975)*se)
+    )
+iapredhr
+```
+
+```{r}
+iapredhr %>%
+    mutate(
+        across(c(hr, lwr, upr), ~round(100*(1 - (1/.x)), 2))
+    )
+```
+
+```{r}
+options(repr.plot.width = 7, repr.plot.height = 3.5)
+iapred %>%
+    mutate(
+        eid = factor(
+            case_match(
+                eid,
+                "Conc" ~ "Max concordant\nMin discordant",
+                "Ave" ~ "Both PRS at\nmedian",
+                "Disc" ~ "Max discordant\nMin concordant"
+            ),
+            levels = c(
+                "Max concordant\nMin discordant",
+                "Both PRS at\nmedian",
+                "Max discordant\nMin concordant"
+            )
+        ),
+        T2D = case_match(
+            T2D,
+            0 ~ "No T2D",
+            1 ~ "T2D"
+        ),
+        maxval = max(upper)
+    ) %>%
+    nest(D = -c(sex, maxval)) %>%
+    arrange(sex) %>%
+    mutate(
+        D = map2(
+            D, sex,
+            ~.x %>%
+                mutate(sex = .y) %>%
+                ggplot(aes(interaction(T2D, eid), fit)) +
+                geom_col(aes(fill = eid), show.legend = FALSE) +
+                geom_linerange(aes(ymin = lower, ymax = upper)) +
+                scale_x_discrete(guide = ggh4x::guide_axis_nested()) +
+                scale_y_continuous(labels = scales::label_percent()) +
+                facet_wrap(~sex) +
+                labs(x = NULL, y = "Estimated 10-yr risk\n95% CI") +
+                theme_bw() +
+                theme(axis.text = element_text(size = 7),
+                      axis.title = element_text(size = 8))
+        ),
+        D = map2(
+            D, maxval, 
+            ~.x + 
+                ggplot2::coord_cartesian(ylim = c(0, .y))
+        ),
+        D = map2(
+            row_number(), D, 
+            ~if(.x == 2){
+                .y + 
+                    labs(y = NULL) + 
+                    theme(
+                        axis.text.y = element_blank(),
+                        axis.ticks.y = element_blank()
+                    )
+            } else { .y }
+        ),
+        Dinset = map(sex, ~filter(iapredhr, sex == .x)),
+        Dinset = map(
+            Dinset,
+            ~.x %>%
+                mutate(eid = factor(eid, levels = c("Disc", "Aver", "Conc"))) %>%
+                ggplot(aes(hr, eid)) +
+                geom_vline(xintercept = 1, lty = "dashed") +
+                geom_linerange(aes(xmin = lwr, xmax = upr)) +
+                geom_point(aes(color = factor(desc(eid))), show.legend = FALSE) +
+                labs(x = "T2D HR", y = NULL) +
+                coord_cartesian(xlim = c(0.7, 3)) +
+                scale_x_continuous(breaks = c(1, 2, 3)) +
+                theme_bw() +
+                theme(
+                    axis.text.x = element_text(size = 5),
+                    axis.title.x = element_text(size = 7),
+                    axis.text.y = element_blank(),
+                    axis.ticks.y = element_blank(),
+                    plot.background = element_rect(color = "black")
+                )
+        ),
+        D = map2(
+            D, Dinset, 
+            ~.x + patchwork::inset_element(.y, 0.65, 0.55, .98, .98)
+        )
+    ) %>%
+    pull(D) %>%
+    patchwork::wrap_plots(nrow = 1)
+```
+
+## Secondary prevention setting
+
+### Associations with survival
+
+```{r}
+spdat <- score2datbysex %>%
+    mutate(
+        Data = map(Data, drop_na),
+        modprsunadj = map(
+            Data,
+            ~survival::coxph(
+                reformulate(
+                    termlabels = c("age", paste0("gpc", 1:10), c("Concordant", "Discordant")),
+                    response = "survival::Surv(time = outcome_timeyrs, event = outcome_value)"
+                ),
+                data = .x
+            )
+        ),
+        modprsadjmace = map(
+            Data,
+            ~survival::coxph(
+                reformulate(
+                    termlabels = c("age", paste0("gpc", 1:10), 
+                                   "priorMACE", c("Concordant", "Discordant")),
+                    response = "survival::Surv(time = outcome_timeyrs, event = outcome_value)"
+                ),
+                data = .x
+            )
+        ),
+        modprsbymace = map(
+            Data,
+            ~survival::coxph(
+                reformulate(
+                    termlabels = c("age", paste0("gpc", 1:10), 
+                                   "priorMACE", c("Concordant", "Discordant"),
+                                   paste("priorMACE", c("Concordant", "Discordant"), sep = ":")),
+                    response = "survival::Surv(time = outcome_timeyrs, event = outcome_value)"
+                ),
+                data = .x
+            )
+        ),
+    )
+print(spdat)
+```
+
+```{r}
+simpvsadj_sp <- spdat %>%
+    select(sex, modprsunadj, modprsadjmace) %>%
+    pivot_longer(-sex) %>%
+    mutate(value = map(value, broom::tidy)) %>%
+    unnest(value) %>%
+    filter(term %in% c("Concordant", "Discordant"))
+simpvsadj_sp
+```
+
+### HR per allele by prior MACE strata
+
+```{r}
+margbetasbymace <- spdat %>%
+    transmute(
+        sex, 
+        modres = map(modprsbymace, broom::tidy, conf.int = TRUE)
+    ) %>%
+    unnest(modres) %>%
+    filter(!term %in% c("age", paste0("gpc", 1:10)))
+margbetasbymace
+```
+
+```{r}
+margestbymace <- spdat %>%
+    transmute(
+        sex,
+        modres = map(
+            modprsbymace, 
+            function(MODEL){
+                map(
+                    c("Concordant", "Discordant"),
+                    function(PROFILE){
+                        RES1 <- data.frame(
+                            Profile = PROFILE,
+                            Subset = "Without MACE",
+                            Estimate = coef(MODEL)[PROFILE],
+                            SE = sqrt(drop(vcov(MODEL)[PROFILE, PROFILE]))
+                        )
+                        TERMS <- c(PROFILE, paste("priorMACE", PROFILE, sep = ":"))
+                        RES2 <- data.frame(
+                            Profile = PROFILE,
+                            Subset = "With MACE",
+                            Estimate = sum(coef(MODEL)[TERMS]),
+                            SE = sqrt(drop(c(1,1) %*% vcov(MODEL)[TERMS, TERMS] %*% c(1,1)))
+                        )
+                        bind_rows(RES1, RES2)
+                    }
+                ) %>%
+                bind_rows
+            }
+        )
+    ) %>%
+    unnest(modres) %>%
+    mutate(
+        Lower = Estimate - (qnorm(1 - (.05/2)) * SE),
+        Upper = Estimate + (qnorm(1 - (.05/2)) * SE),
+        Pval = 2*pnorm(-abs(Estimate/SE)),
+        across(c(Estimate, Lower, Upper), exp),
+        SE = NULL
+    )   
+margestbymace
+```
+
+```{r}
+options(repr.plot.width = 5, repr.plot.height = 2)
+margestbymace %>%
+    ggplot(aes(Estimate, interaction(Subset, Profile))) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(
+        aes(xmin = Lower, xmax = Upper)
+    ) +
+    geom_point() +
+    facet_wrap(~sex) +
+    scale_y_discrete(guide = ggh4x::guide_axis_nested()) +
+    theme_bw() +
+    labs(
+        x = "HR per allele (95% CI)",
+        y = NULL
+    )
+```
+
+## Predictor distributions in prior MACE vs no prior MACE at baseline
+
+```{r}
+options(repr.plot.width = 7, repr.plot.height = 2)
+spdat %>%
+    mutate(
+        Data = map(Data, nest, Dat = -priorMACE)
+    ) %>%
+    unnest(Data) %>%
+    transmute(
+        sex, 
+        priorMACE = ifelse(priorMACE == 1, "Yes", "No"),
+        Dat = map(Dat, select, eid, age, sbp, tchol, hdl, hba1c, lnegfr),
+        Dat = map(Dat, pivot_longer, -eid)
+    ) %>%
+    unnest(Dat) %>%
+    group_by(priorMACE, name) %>%
+    summarise(
+        q25 = quantile(value, .25),
+        q50 = quantile(value, .5),
+        q75 = quantile(value, .75),
+        iqrval = q75 - q25,
+        minval = q25 - (1.5*iqrval),
+        maxval = q75 + (1.5*iqrval)
+    ) %>%
+    ggplot(aes(priorMACE, q50)) +
+    geom_boxplot(
+        aes(
+            group = priorMACE,
+            ymin = minval, lower = q25, middle = q50, upper = q75, ymax = maxval
+        ), 
+        stat = "identity"
+    ) +
+    facet_wrap(~name, nrow = 1, scales = "free") +
+    theme_bw() +
+    labs(y = NULL)
+```
+
+### Associations after adjustment by covariates in SCORE2
+
+```{r}
+spdat <- spdat %>%
+    mutate(
+        modprscore2bymace = map(
+            Data,
+            ~survival::coxph(
+                reformulate(
+                    termlabels = c(".", paste("priorMACE", c("Concordant", "Discordant"), sep = ":")),
+                    response = "survival::Surv(time = outcome_timeyrs, event = outcome_value)"
+                ),
+                data = select(.x, -eid)
+            )
+        )
+    )
+print(spdat)
+```
+
+```{r}
+condbetasbymace <- spdat %>%
+    transmute(
+        sex, 
+        modres = map(modprscore2bymace, broom::tidy, conf.int = TRUE)
+    ) %>%
+    unnest(modres) %>%
+    filter(
+        term == "T2D"|
+        term %in% c("Concordant", "Discordant")|
+        grepl(":", term)
+    )
+condbetasbymace
+```
+
+```{r}
+condestbymace <- spdat %>%
+    transmute(
+        sex,
+        modres = map(
+            modprscore2bymace, 
+            function(MODEL){
+                map(
+                    c("Concordant", "Discordant"),
+                    function(PROFILE){
+                        RES1 <- data.frame(
+                            Profile = PROFILE,
+                            Subset = "Without MACE",
+                            Estimate = coef(MODEL)[PROFILE],
+                            SE = sqrt(drop(vcov(MODEL)[PROFILE, PROFILE]))
+                        )
+                        TERMS <- c(PROFILE, paste(PROFILE, "priorMACE", sep = ":"))
+                        RES2 <- data.frame(
+                            Profile = PROFILE,
+                            Subset = "With MACE",
+                            Estimate = sum(coef(MODEL)[TERMS]),
+                            SE = sqrt(drop(c(1,1) %*% vcov(MODEL)[TERMS, TERMS] %*% c(1,1)))
+                        )
+                        bind_rows(RES1, RES2)
+                    }
+                ) %>%
+                bind_rows
+            }
+        )
+    ) %>%
+    unnest(modres) %>%
+    mutate(
+        Lower = Estimate - (qnorm(1 - (.05/2)) * SE),
+        Upper = Estimate + (qnorm(1 - (.05/2)) * SE),
+        Pval = 2*pnorm(-abs(Estimate/SE)),
+        across(c(Estimate, Lower, Upper), exp),
+        SE = NULL
+    )   
+condestbymace
+```
+
+```{r}
+options(repr.plot.width = 5, repr.plot.height = 2)
+condestbymace %>%
+    ggplot(aes(Estimate, interaction(Subset, Profile))) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(
+        aes(xmin = Lower, xmax = Upper)
+    ) +
+    geom_point() +
+    facet_wrap(~sex) +
+    scale_y_discrete(guide = ggh4x::guide_axis_nested()) +
+    theme_bw() +
+    labs(
+        x = "HR per allele (95% CI)",
+        y = NULL
+    )
+```
+
+### Risk by PRS decile and MACE strata
+
+```{r}
+iapred_mace <- spdat %>%
+    transmute(
+        sex,
+        riskmace = map2(
+            Data, modprscore2bymace,
+            function(DAT, FIT){
+                AveDat <- FIT$mean
+                CovarNm <- names(AveDat)
+                CovarNm <- CovarNm[!grepl("Concordant|Discordant|priorMACE", CovarNm)]
+                AveDat <- AveDat[CovarNm]
+                ConcPRS <- DAT[["Concordant"]]
+                DiscPRS <- DAT[["Discordant"]]
+                NewDat <- tribble(
+                    ~eid, ~Concordant, ~Discordant,
+                    #"Conc", quantile(ConcPRS, probs = .95), quantile(DiscPRS, probs = .05),
+                    "Conc", max(ConcPRS), min(DiscPRS),
+                    "Ave", quantile(ConcPRS, probs = .5), quantile(DiscPRS, probs = .5),
+                    #"Disc", quantile(ConcPRS, probs = .05), quantile(DiscPRS, probs = .95)
+                    "Disc", min(ConcPRS), max(DiscPRS),
+                ) %>%
+                    bind_cols(data.frame(t(AveDat))) %>%
+                    expand_grid(priorMACE = 0:1) %>%
+                    mutate(
+                        outcome_value = 0, outcome_timeyrs = 10,
+                        priorMACE_timeyrs = priorMACE
+                    )
+                RES <- data.frame(predict(FIT, NewDat, type = "survival", se.fit = TRUE))
+                transmute(NewDat, eid, priorMACE) %>% bind_cols(RES)
+            }
+        )
+    ) %>%
+    unnest(riskmace) %>%
+    mutate(
+        lower = fit - qnorm(1 - .05/2)*se.fit,
+        upper = fit + qnorm(1 - .05/2)*se.fit,
+        se.fit = NULL,
+        across(c(fit, lower, upper), ~1-.x)
+    )
+head(iapred_mace)
+```
+
+```{r}
+options(repr.plot.width = 7, repr.plot.height = 3.5)
+iapred_mace %>%
+    mutate(
+        eid = case_match(
+            eid,
+            "Conc" ~ "Top concordant\nBottom discordant",
+            "Ave" ~ "Both PRS at\nmedian",
+            "Disc" ~ "Top discordant\nBottom concordant"
+        ),
+        eid = factor(
+            eid,
+            levels = c(
+                "Top concordant\nBottom discordant",
+                "Both PRS at\nmedian",
+                "Top discordant\nBottom concordant"
+            )
+        ),
+        priorMACE = case_match(
+            priorMACE,
+            0 ~ "No prior MACE",
+            1 ~ "Prior MACE"
+        )
+    ) %>%
+    ggplot(aes(interaction(priorMACE, eid), fit)) +
+    geom_col(aes(fill = eid), show.legend = FALSE) +
+    geom_linerange(aes(ymin = lower, ymax = upper)) +
+    scale_x_discrete(guide = ggh4x::guide_axis_nested()) +
+    scale_y_continuous(labels = scales::label_percent()) +
+    facet_wrap(~sex) +
+    labs(x = "\nPrior MACE & PRS", y = "Estimated 10-yr risk") +
+    theme_bw() +
+    theme(axis.text = element_text(size = 7),
+          axis.title = element_text(size = 8))
+```
+
+## Separate models in individuals with prior MACE
+
+```{r}
+spdat_maceonly <- spdat %>%
+    transmute(
+        sex,
+        Data = map(Data, filter, priorMACE == 1),
+        Data = map(Data, select, -priorMACE),
+        modnull = map(
+            Data,
+            ~survival::coxph(
+                reformulate(
+                    termlabels = "1",
+                    response = "survival::Surv(time = outcome_timeyrs, event = outcome_value)"
+                ),
+                data = .x
+            )
+        ),
+        modprsunadj = map(
+            Data,
+            ~survival::coxph(
+                reformulate(
+                    termlabels = c("age", paste0("gpc", 1:10), c("Concordant", "Discordant")),
+                    response = "survival::Surv(time = outcome_timeyrs, event = outcome_value)"
+                ),
+                data = .x
+            )
+        ),
+        modscore2 = map(
+            Data,
+            ~survival::coxph(
+                reformulate(
+                    termlabels = ". - eid - Concordant - Discordant",
+                    response = "survival::Surv(time = outcome_timeyrs, event = outcome_value)"
+                ),
+                data = .x
+            )
+        ),
+        modprscore2 = map(
+            Data,
+            ~survival::coxph(
+                reformulate(
+                    termlabels = ". - eid",
+                    response = "survival::Surv(time = outcome_timeyrs, event = outcome_value)"
+                ),
+                data = .x
+            )
+        )
+    )     
+print(spdat_maceonly)
+```
+
+```{r}
+maceonlyres <- spdat_maceonly %>%
+    select(-c(Data, modnull)) %>%
+    pivot_longer(starts_with("mod"), names_to = "model_name", values_to = "model") %>%
+    mutate(
+        model = map(model, broom::tidy, conf.int = TRUE)
+    ) %>%
+    unnest(model) %>%
+    filter(term %in% c("Concordant", "Discordant"))
+maceonlyres
+```
+
+```{r}
+lrtres_maceonly <- spdat_maceonly %>%
+    transmute(
+        sex,
+        across(
+            c(modnull, modscore2, modprscore2),
+            ~map_dbl(.x, logLik),
+            .names = "LL{.col}"
+        ),
+        across(starts_with("LL"), ~2*abs(.x - LLmodnull),
+               .names = "LR{.col}"),
+        LRLLmodnull = NULL,
+        across(
+            c(modscore2, modprscore2),
+            ~map_dbl(.x, \(MOD) sum(!is.na(MOD$coefficients))),
+            .names = "NV{.col}"
+        ),
+        LRTp = pchisq(
+            q = 2 * abs(LLmodprscore2 - LLmodscore2),
+            df = NVmodprscore2 - NVmodscore2,
+            lower.tail = FALSE
+        ),
+        FAI = 100 * (1 - (LRLLmodscore2 / LRLLmodprscore2)),
+        across(
+            c(modscore2, modprscore2),
+            ~map_dbl(.x, \(MOD) extractAIC(MOD)[2]),
+            .names = "AIC{.col}"
+        ),
+    )
+lrtres_maceonly
+```
+
+## ORIGIN data
+
+```{r}
+options(repr.plot.width = 5, repr.plot.height = 2.5)
+list(
+    simpmodres %>%
+        transmute(Subset = "UKB_NoMACE", sex, Profile = term, Estimate = estimate, se = std.error),
+    maceonlyres %>%
+        filter(model_name == "modprsunadj") %>%
+        transmute(Subset = "UKB_PriorMACE", sex, Profile = term, Estimate = estimate, se = std.error),
+    read_table(
+    "
+Subset sex Profile Estimate OR se z pval
+ORIGIN_EUR Male Concordant        1.170e-02  1.012e+00  1.146e-02  1.021   0.3071
+ORIGIN_EUR Male Discordant        1.403e-02  1.014e+00  2.865e-02  0.490   0.6244
+ORIGIN_EUR Female Concordant        6.426e-03  1.006e+00  2.103e-02  0.305  0.75999
+ORIGIN_EUR Female Discordant        3.462e-02  1.035e+00  4.904e-02  0.706  0.48025
+ORIGIN_LAT Male Concordant        0.0068880  1.0069118  0.0115744  0.595   0.5518
+ORIGIN_LAT Male Discordant        0.0497132  1.0509697  0.0280101  1.775   0.0759
+ORIGIN_LAT Female Concordant       -3.538e-02  9.652e-01  1.854e-02 -1.908  0.05640
+ORIGIN_LAT Female Discordant        7.598e-02  1.079e+00  4.196e-02  1.811  0.07015
+"
+    ) %>%
+        transmute(Subset, sex, Profile, Estimate, se)
+) %>%
+    bind_rows %>%
+    mutate(
+        Lower = Estimate - qnorm(1 - .05/2)*se,
+        Upper = Estimate + qnorm(1 - .05/2)*se,
+        across(c(Estimate, Lower, Upper), exp)
+    ) %>%
+    mutate(
+        Subset = factor(
+            Subset, 
+            levels = c(
+                "UKB_NoMACE", "UKB_PriorMACE", 
+                "ORIGIN_EUR", "ORIGIN_LAT"
+            )
+        )
+    ) %>%
+    ggplot(aes(Estimate, interaction(Subset, Profile))) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(
+        aes(xmin = Lower, xmax = Upper)
+    ) +
+    geom_point() +
+    facet_wrap(~sex) +
+    scale_y_discrete(guide = ggh4x::guide_axis_nested()) +
+    theme_bw() +
+    labs(
+        x = "HR per allele (95% CI)",
+        y = NULL
+    )
+```
+
+```{r}
+maceonlyres %>%
+    filter(model_name == "modprsunadj")
+```
+
+```{r}
+options(repr.plot.width = 5, repr.plot.height = 2.5)
+read_table(
+    "
+Subset sex Profile Estimate OR se z pval
+ORIGIN_EUR Male Concordant        1.170e-02  1.012e+00  1.146e-02  1.021   0.3071
+ORIGIN_EUR Male Discordant        1.403e-02  1.014e+00  2.865e-02  0.490   0.6244
+ORIGIN_EUR Female Concordant        6.426e-03  1.006e+00  2.103e-02  0.305  0.75999
+ORIGIN_EUR Female Discordant        3.462e-02  1.035e+00  4.904e-02  0.706  0.48025
+ORIGIN_LAT Male Concordant        0.0068880  1.0069118  0.0115744  0.595   0.5518
+ORIGIN_LAT Male Discordant        0.0497132  1.0509697  0.0280101  1.775   0.0759
+ORIGIN_LAT Female Concordant       -3.538e-02  9.652e-01  1.854e-02 -1.908  0.05640
+ORIGIN_LAT Female Discordant        7.598e-02  1.079e+00  4.196e-02  1.811  0.07015
+"
+    ) %>%
+    mutate(
+        Lower = Estimate - qnorm(1 - .05/2)*se,
+        Upper = Estimate + qnorm(1 - .05/2)*se,
+        across(c(Estimate, Lower, Upper), exp)
+    ) %>%
+    bind_rows(
+        mutate(margestORIGIN, Subset = paste("UKB", Subset, sep = "_"))
+    ) %>%
+    mutate(
+        Subset = factor(
+            Subset, 
+            levels = c(
+                "UKB_Excluded", "UKB_Included", 
+                "ORIGIN_EUR", "ORIGIN_LAT"
+            )
+        )
+    ) %>%
+    ggplot(aes(Estimate, interaction(Subset, Profile))) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(
+        aes(xmin = Lower, xmax = Upper)
+    ) +
+    geom_point() +
+    facet_wrap(~sex) +
+    scale_y_discrete(guide = ggh4x::guide_axis_nested()) +
+    theme_bw() +
+    labs(
+        x = "HR per allele (95% CI)",
+        y = NULL
+    )
+```
+
+```{r}
+options(repr.plot.width = 5, repr.plot.height = 2)
+read_table(
+    "
+Subset PriorCVD Profile Estimate OR se z pval
+ORIGIN_EUR NoPriorCVD Concordant        3.998e-03  1.004e+00  2.357e-02  0.170   0.8653
+ORIGIN_EUR NoPriorCVD Discordant        4.914e-02  1.050e+00  5.449e-02  0.902   0.3672
+ORIGIN_EUR PriorCVD Concordant        1.217e-02  1.012e+00  1.116e-02  1.090   0.2756
+ORIGIN_EUR PriorCVD Discordant        1.704e-02  1.017e+00  2.761e-02  0.617   0.5370
+ORIGIN_LAT NoPriorCVD Concordant       -6.037e-03  9.940e-01  1.439e-02 -0.420  0.67478
+ORIGIN_LAT NoPriorCVD Discordant        2.893e-02  1.029e+00  3.366e-02  0.860  0.38996
+ORIGIN_LAT PriorCVD Concordant       -6.848e-03  9.932e-01  1.325e-02 -0.517 0.605304
+ORIGIN_LAT PriorCVD Discordant        9.045e-02  1.095e+00  3.288e-02  2.751 0.005942
+"
+    ) %>%
+    mutate(
+        Lower = Estimate - qnorm(1 - .05/2)*se,
+        Upper = Estimate + qnorm(1 - .05/2)*se,
+        across(c(Estimate, Lower, Upper), exp)
+    ) %>%
+    ggplot(aes(Estimate, interaction(PriorCVD, Profile))) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(
+        aes(xmin = Lower, xmax = Upper)
+    ) +
+    geom_point() +
+    scale_y_discrete(guide = ggh4x::guide_axis_nested()) +
+    facet_wrap(~Subset) +
+    theme_bw() +
+    labs(
+        x = "HR per allele (95% CI)",
+        y = NULL
+    )
+```
+
+```{r}
+options(repr.plot.width = 3, repr.plot.height = 4)
+read_table(
+    "
+Subset Model Profile Estimate OR se z pval
+ORIGIN_EUR Minimal Concordant        1.181e-02  1.012e+00  9.950e-03  1.187  0.23520
+ORIGIN_EUR Minimal Discordant        2.149e-02  1.022e+00  2.454e-02  0.876  0.38109
+ORIGIN_EUR Full Concordant        1.149e-02  1.012e+00  1.014e-02  1.134   0.2570
+ORIGIN_EUR Full Discordant        1.660e-02  1.017e+00  2.499e-02  0.664   0.5064
+ORIGIN_LAT Minimal Concordant        -0.004647   0.995364   0.009648 -0.482  0.63009
+ORIGIN_LAT Minimal Discordant         0.055977   1.057573   0.023282  2.404  0.01620
+ORIGIN_LAT Full Concordant        -0.004078   0.995930   0.009892 -0.412  0.68013
+ORIGIN_LAT Full Discordant         0.039347   1.040131   0.023835  1.651  0.09878
+"
+    ) %>%
+    mutate(
+        Subset = factor(Subset, levels = c("ORIGIN_LAT", "ORIGIN_EUR")),
+        Lower = Estimate - qnorm(1 - .05/2)*se,
+        Upper = Estimate + qnorm(1 - .05/2)*se,
+        across(c(Estimate, Lower, Upper), exp)
+    ) %>%
+    ggplot(aes(Estimate, interaction(Model, Profile))) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(
+        aes(xmin = Lower, xmax = Upper)
+    ) +
+    geom_point() +
+    scale_y_discrete(guide = ggh4x::guide_axis_nested()) +
+    facet_wrap(~Subset, ncol = 1) +
+    theme_bw() +
+    labs(
+        x = "HR per allele (95% CI)",
+        y = NULL
+    )
+```
+
+LR in EUR
+
+```{r}
+LRscore2 <- 141.7
+NVscore2 <- 26
+LRscore2prs <- 143.4
+NVscore2prs <- 28
+pchisq(
+    q = LRscore2prs - LRscore2,
+    df = NVscore2prs - NVscore2,
+    lower.tail = FALSE
+)
+```
+
+```{r}
+100 * (1 - (LRscore2 / LRscore2prs))
+```
+
+LR in Latin
+
+```{r}
+LRscore2 <- 155.7
+NVscore2 <- 26
+LRscore2prs <- 158.7
+NVscore2prs <- 28
+pchisq(
+    q = LRscore2prs - LRscore2,
+    df = NVscore2prs - NVscore2,
+    lower.tail = FALSE
+)
+```
+
+```{r}
+100 * (1 - (LRscore2 / LRscore2prs))
+```
+
+```{r}
+spdat %>%
+    mutate
+```
+

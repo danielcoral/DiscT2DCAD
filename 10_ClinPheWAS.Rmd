@@ -1,0 +1,37 @@
+---
+title: An R Markdown document converted from "10_ClinPheWAS.ipynb"
+output: html_document
+---
+
+# Phenome-wide scan - Clinical phenotypes
+
+```{r}
+proxiestab <- readr::read_tsv("../data/proxiestab.tsv", show_col_types = FALSE)
+variants <- unique(proxiestab$rsid_proxy)
+variants <- split(variants, f = ceiling(1:length(variants)/5))
+batches_to_use <- c(
+    "ebi-a",
+    "finn-b",
+    "ieu-a",
+    "ieu-b",
+    "ukb-a",
+    "ukb-b",
+    "ukb-d"
+)
+clinphewasres <- NULL
+for(snpbatch in 1:length(variants)){
+    message(paste("Querying batch", snpbatch, "of", length(variants)), ".")
+    res <- ieugwasr::phewas(variants = variants[[snpbatch]], pval = 1, batch = batches_to_use)
+    while(class(res)[1] == "response"){
+        message("Waiting 1 minute for server to respond...")
+        Sys.sleep(60)
+        message("Retrying...")
+        res <- ieugwasr::phewas(variants = variants[[snpbatch]], pval = 1, batch = batches_to_use)
+    }
+    clinphewasres <- rbind(clinphewasres, res)
+    message("Done!")
+    Sys.sleep(5)
+}
+readr::write_tsv(clinphewasres, "../data/clinphewasres.tsv")
+```
+

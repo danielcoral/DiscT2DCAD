@@ -1,0 +1,143 @@
+---
+title: An R Markdown document converted from "19_GutMBPheWASRes.ipynb"
+output: html_document
+---
+
+# Results of PheWAS - Gut microbiome
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(purrr)
+```
+
+```{r}
+gutmbphewasres <- read_tsv("../data/taxa_df.tsv", show_col_types = FALSE)
+head(gutmbphewasres)
+```
+
+```{r}
+proxiestab <- readr::read_tsv("../data/proxiestab.tsv", show_col_types = FALSE)
+head(proxiestab)
+```
+
+```{r}
+gutmbphewasres <- inner_join(proxiestab, gutmbphewasres, by = "rsid_proxy", relationship = "many-to-many")
+head(gutmbphewasres)
+```
+
+```{r}
+gutmbphewasres <- gutmbphewasres %>%
+    mutate(
+        across(
+            c(ea_mb, nea_mb),
+            ~stringr::str_replace_all(.x, c("A" = "t", "T" = "a", "C" = "g", "G" = "c")),
+            .names = "{.col}_flip"
+        ),
+        across(
+            c(ea_mb_flip, nea_mb_flip),
+            ~toupper(.x)
+        ),
+        harmon1 = case_when(ea_proxy == ea_mb & nea_proxy == nea_mb ~ 1,
+                            ea_proxy == nea_mb & nea_proxy == ea_mb ~ -1,
+                            TRUE ~ NaN),
+        harmon2 = case_when(ea_proxy == ea_mb_flip & nea_proxy == nea_mb_flip ~ 1,
+                            ea_proxy == nea_mb_flip & nea_proxy == ea_mb_flip ~ -1,
+                            TRUE ~ NaN),
+        harmon = coalesce(harmon1, harmon2),
+        beta_mb = beta_mb * harmon
+    ) %>%
+    filter(!is.na(harmon)) %>%
+    select(-c(ea_mb, nea_mb, ea_mb_flip, nea_mb_flip, harmon, harmon1, harmon2,
+              rsid_proxy, ea_t2d, nea_t2d, ea_proxy, nea_proxy))
+head(gutmbphewasres)
+```
+
+```{r}
+ctgwas_sig <- read_tsv("../data/ctgwas_sig.tsv", show_col_types = FALSE)
+head(ctgwas_sig)
+```
+
+```{r}
+ctgwas_sig <- ctgwas_sig %>%
+    group_by(trait) %>%
+    add_count(name = "nsnps") %>%
+    ungroup
+head(ctgwas_sig)
+```
+
+```{r}
+gutmbphewas <- inner_join(ctgwas_sig, gutmbphewasres, by = "rsid", relationship = "many-to-many")
+head(gutmbphewas)
+```
+
+```{r}
+gutmbphewas <- gutmbphewas %>%
+    group_by(trait, rsid, taxa, name_mb) %>%
+    arrange(desc(reference_snp), pval_mb, .by_group = TRUE) %>%
+    slice(1) %>%
+    ungroup %>%
+    select(-c(r2, reference_snp))
+head(gutmbphewas)
+```
+
+```{r}
+gutmbphewas <- gutmbphewas %>%
+    group_by(trait, taxa, name_mb) %>%
+    add_count(name = "nsnps_exp") %>%
+    ungroup
+head(gutmbphewas)
+```
+
+```{r}
+write_tsv(gutmbphewas, "../data/gutmbphewas.tsv")
+```
+
+```{r}
+gutmbmeta <- gutmbphewas %>%
+    group_by(trait, profile, taxa, name_mb) %>%
+    nest
+print(gutmbmeta)
+```
+
+```{r}
+gutmbmeta <- gutmbmeta %>%
+    mutate(
+        metares = map(
+            data,
+            ~tryCatch(
+                {
+                    PROFILEMETA <- meta::metagen(
+                        TE = beta_mb, seTE = se_mb, data = .x,
+                        fixed = FALSE, random = TRUE,
+                        method.tau = "PM", prediction = FALSE
+                    )
+                    with(
+                        PROFILEMETA,
+                        tibble(
+                            beta_meta = TE.random, se_meta = seTE.random, pval_meta = pval.random, 
+                            conf_low_meta = lower.random, conf_high_meta = upper.random,
+                            Qv = Q, Qdf = df.Q, Qp = pval.Q, Tau = tau
+                        )
+                    )
+                },
+                error = function(e){ tibble(NULL) }
+            )
+        )
+    )
+print(gutmbmeta)
+```
+
+```{r}
+gutmbmeta <- gutmbmeta %>%
+    select(metares) %>%
+    unnest(metares) %>%
+    ungroup
+head(gutmbmeta)
+```
+
+```{r}
+write_tsv(gutmbmeta, "../data/gutmbmeta.tsv")
+```
+

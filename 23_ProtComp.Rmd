@@ -1,0 +1,97 @@
+---
+title: An R Markdown document converted from "23_ProtComp.ipynb"
+output: html_document
+---
+
+# Profile comparison - Proteins
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(purrr)
+```
+
+```{r}
+protmeta <- read_tsv("../data/protmeta.tsv", show_col_types = FALSE)
+head(protmeta)
+```
+
+```{r}
+length(unique(protmeta$id_exp))
+```
+
+```{r}
+protcomp <- protmeta %>%
+    group_by(trait, id_exp, name_exp) %>%
+    nest %>%
+    ungroup
+print(protcomp)
+```
+
+```{r}
+protcomp <- protcomp %>%
+    mutate(
+        twoprofiles = map_lgl(
+            data,
+            ~all(c("Concordant", "Discordant") %in% .x$profile)
+        )
+    )
+print(protcomp)
+```
+
+```{r}
+protcomp %>%
+    ungroup %>%
+    count(trait, twoprofiles)
+```
+
+```{r}
+protcomp <- protcomp %>%
+    filter(twoprofiles)
+print(protcomp)
+```
+
+```{r}
+protcomp <- protcomp %>%
+    mutate(
+        Nconc = map_dbl(
+            data,
+            ~.x$Qdf[.x$profile == "Concordant"] + 1
+        ),
+        Ndisc = map_dbl(
+            data,
+            ~.x$Qdf[.x$profile == "Discordant"] + 1
+        )
+    )
+print(protcomp)
+```
+
+```{r}
+protcomp %>%
+    count(trait, Nconc, Ndisc)
+```
+
+```{r}
+protcomp <- protcomp %>%
+    filter(Nconc > 2, Ndisc > 2)
+print(protcomp)
+```
+
+```{r}
+protcomp <- protcomp %>%
+    transmute(
+        trait, id_exp, name_exp,
+        beta_comp = map_dbl(data, ~abs(diff(.x$beta_meta))),
+        se_comp = map_dbl(data, ~sqrt(sum(.x$se_meta^2))),
+        pval_comp = 2 * pnorm(-abs(beta_comp / se_comp))
+    )
+head(protcomp)
+```
+
+```{r}
+protcompsig <- protcomp %>%
+    filter(p.adjust(pval_comp, "fdr") <= 0.05)
+head(protcompsig)
+```
+

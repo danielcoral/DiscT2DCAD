@@ -1,0 +1,241 @@
+---
+title: An R Markdown document converted from "42_SNPClus.ipynb"
+output: html_document
+---
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(purrr)
+library(ggplot2)
+```
+
+```{r}
+options(repr.plot.res = 300)
+```
+
+## SNP clusters
+
+```{r}
+bnmfres <- read_tsv(
+    "../data/SNPclus/bNMFRes.txt", 
+    skip = 1,
+    col_types = "c-ccnnnnnnnnnn",
+    col_names = c(
+        "rsid", "chrompos", "ea_clus",
+        "betacell1", "betacell2", "proinsulin", "lpa", "obesity", 
+        "lipodystrophy", "liver_lipid", "alp_neg", "hyperinsulin", "shbg"
+    )
+)
+head(bnmfres)
+nrow(bnmfres)
+```
+
+Long format:
+
+```{r}
+bnmflong <- bnmfres %>%
+    pivot_longer(-c(rsid, chrompos, ea_clus), names_to = "clusnam", values_to = "clusw") %>%
+    separate_wider_delim(chrompos, delim = "_", names = c("chrom", "pos", "a1", "a2")) %>%
+    mutate(
+        nea_clus = case_when(
+            ea_clus == a1 ~ a2,
+            ea_clus == a2 ~ a1
+        )
+    ) %>%
+    select(rsid, ea_clus, nea_clus, clusnam, clusw)
+head(bnmflong)
+```
+
+Files to write PLINK output:
+
+```{r}
+out <- "../data/SNPclus/rsids"
+targetsname <- paste0(out, ".targets")
+outname <- paste0(out, ".targets.ld")
+```
+
+SNPs to query:
+
+```{r}
+utils::write.table(unique(bnmfres$rsid), 
+                   file=targetsname,
+                   row=FALSE, col=FALSE, qu=FALSE)
+```
+
+PLINK command:
+
+```{r}
+cmd <- paste(
+    "~/bin/plink",
+    "--bfile", "~/projects/DVA/Data/ReferenceData/1kg_ref/EUR",
+    "--r2", "in-phase", "with-freqs",
+    "--ld-snp-list", targetsname, 
+    "--ld-window-kb", 1000,
+    "--ld-window-r2", 0.01,
+    "--ld-window", 999999,
+    "--out", targetsname
+)
+```
+
+Running PLINK command:
+
+```{r}
+system(cmd)
+```
+
+Proxies table:
+
+```{r}
+proxiestab <- readr::read_table(
+    outname,
+    skip = 1,
+    col_types = "--c---ccnn-",
+    col_names = c("rsid", "rsid_proxy", "phase", "maf_proxy", "r2")
+)
+head(proxiestab)
+```
+
+Cleaning proxies tab:
+
+```{r}
+proxiestab <- proxiestab %>%
+    mutate(phase = gsub("/", "", phase)) %>%
+    filter(nchar(phase) == 4) %>%
+    separate_wider_position(phase, widths = c(a1 = 1, b1 = 1, a2 = 1, b2 = 1)) %>%
+    mutate(
+        reference_snp = rsid == rsid_proxy,
+        pal1 = b1 %in% c("A", "T") & b2 %in% c("A", "T"),
+        pal2 = b1 %in% c("C", "G") & b2 %in% c("C", "G"),
+        pal_ambig = (pal1 | pal2) & maf_proxy > 0.4
+    ) %>%
+    filter(!pal_ambig) %>%
+    select(-c(pal1, pal2, pal_ambig, maf_proxy)) %>%
+    arrange(rsid, desc(reference_snp), desc(r2))
+head(proxiestab)
+```
+
+Aligning to the allele increasing T2D risk:
+
+```{r}
+bnmfp <- bnmflong %>%
+    inner_join(proxiestab, by = "rsid", relationship = "many-to-many") %>%
+    mutate(
+        across(
+            c(a1, a2),
+            ~stringr::str_replace_all(.x, c("A" = "t", "T" = "a", "C" = "g", "G" = "c")),
+            .names = "{.col}_flip"
+        ),
+        across(
+            c(a1_flip, a2_flip),
+            ~toupper(.x)
+        ),
+        harmon1 = case_when(ea_clus == a1 & nea_clus == a2 ~ 1,
+                            ea_clus == a2 & nea_clus == a1 ~ -1,
+                            TRUE ~ NaN),
+        harmon2 = case_when(ea_clus == a1_flip & nea_clus == a2_flip ~ 1,
+                            ea_clus == a2_flip & nea_clus == a1_flip ~ -1,
+                            TRUE ~ NaN),
+        harmon = coalesce(harmon1, harmon2),
+        ea_proxy = ifelse(harmon == 1, b1, b2),
+        nea_proxy = ifelse(harmon == 1, b2, b1)
+    ) %>%
+    select(-c(a1, a2, a1_flip, a2_flip, b1, b2, harmon, harmon1, harmon2))
+head(bnmfp)
+```
+
+Joining with cross-trait GWAS:
+
+```{r}
+ctgwas_sig <- read_tsv("../data/ctgwas_sig.tsv", show_col_types = FALSE) %>%
+    filter(trait == "cad") %>%
+    select(-trait)
+head(ctgwas_sig)
+nrow(ctgwas_sig)
+```
+
+```{r}
+bnmfp2 <- bnmfp %>%
+    inner_join(ctgwas_sig, by = c("rsid_proxy" = "rsid")) %>%
+    mutate(
+        across(
+            c(ea_proxy, nea_proxy),
+            function(x){
+                stringr::str_replace_all(x, c("A" = "t", "T" = "a", "C" = "g", "G" = "c"))
+            },
+            .names = "{.col}_flip"
+        ),
+        across(
+            c(ea_proxy_flip, nea_proxy_flip),
+            function(x){ toupper(x) }
+        ),
+        harmon1 = case_when(
+            ea_t2d == ea_proxy & nea_t2d == nea_proxy ~ 1,
+            nea_t2d == ea_proxy & ea_t2d == nea_proxy ~ -1,
+            TRUE ~ NaN
+        ),
+        harmon2 = case_when(
+            ea_t2d == ea_proxy_flip & nea_t2d == nea_proxy_flip ~ 1,
+            ea_t2d == nea_proxy_flip & nea_t2d == ea_proxy_flip ~ -1,
+            TRUE ~ NaN),
+        harmon = coalesce(harmon1, harmon2),
+        clusw = clusw * harmon
+    ) %>%
+    filter(!is.na(harmon)) %>%
+    group_by(clusnam, rsid) %>%
+    arrange(desc(reference_snp), desc(r2), .by_group = TRUE) %>%
+    slice(1) %>%
+    group_by(clusnam, rsid_proxy) %>%
+    arrange(desc(reference_snp), desc(r2), .by_group = TRUE) %>%
+    slice(1) %>%
+    ungroup
+head(bnmfp2)
+```
+
+```{r}
+ctgwas_sig %>%
+    filter(!rsid %in% unique(bnmfp2$rsid_proxy))
+```
+
+```{r}
+ctgwas_sig %>%
+    transmute(inclus = rsid %in% unique(bnmfp2$rsid_proxy), psig = pval_t2d < 5e-8) %>%
+    with(table(inclus, psig))
+```
+
+```{r}
+ctgwas_sig %>%
+    transmute(inclus = rsid %in% unique(bnmfp2$rsid_proxy), psig = pval_t2d < 5e-8) %>%
+    with(table(inclus, psig)) %>%
+    fisher.test()
+```
+
+```{r}
+ctgwas_sig %>%
+    transmute(inclus = rsid %in% unique(bnmfp2$rsid_proxy), psig = pval_trait < 5e-8) %>%
+    with(table(inclus, psig))
+```
+
+```{r}
+ctgwas_sig %>%
+    transmute(inclus = rsid %in% unique(bnmfp2$rsid_proxy), psig = pval_trait < 5e-8) %>%
+    with(table(inclus, psig)) %>%
+    fisher.test()
+```
+
+```{r}
+bnmfcomp <- bnmfp2 %>%
+    nest(dat = -clusnam)
+print(bnmfcomp)
+```
+
+```{r}
+bnmfcomp %>%
+    mutate(
+        dat = map(dat, transmute, profile, inclus = clusw > .8),
+        dat = map(dat, with, table(profile, inclus))
+    ) %>%
+    pull(dat)
+```
+

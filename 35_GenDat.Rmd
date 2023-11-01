@@ -1,0 +1,183 @@
+---
+title: An R Markdown document converted from "35_GenDat.ipynb"
+output: html_document
+---
+
+# Survival analysis with top deciles of concordant and discordant profiles
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(purrr)
+library(ggplot2)
+```
+
+```{r}
+ctgwas_sig <- read_tsv("../data/ctgwas_sig.tsv", show_col_types = FALSE) %>%
+    filter(trait == "cad")
+head(ctgwas_sig)
+```
+
+```{r}
+genotypes <- select(
+    ctgwas_sig,
+    chrom, rsid, ea_t2d, nea_t2d
+) %>%
+    unique
+head(genotypes)
+```
+
+```{r}
+genotypes <- genotypes %>%
+    group_by(chrom) %>%
+    nest %>%
+    ungroup
+print(genotypes)
+```
+
+```{r}
+genotypes <- genotypes %>%
+    mutate(
+        genomat = map2(
+            chrom, data,
+            ~rbgen::bgen.load(
+                filename = paste0("/ludc/Raw_Data_Archive/UKBB/imp/ukb_imp_chr", .x, "_v3.bgen"),
+                rsids = .y$rsid,
+                index.filename = paste0(
+                    "/ludc/Active_Projects/Discordant_variant_analysis/Private/Data/UKBiobank/ukb_bgi/ukb_imp_chr", 
+                    .x, "_v3.bgen.bgi"
+                )
+            )
+        )
+    )
+print(genotypes)
+```
+
+```{r}
+genotypes <- genotypes %>%
+    mutate(
+        snps_retrieved = map(genomat, ~.x$variants),
+        genomat = map(genomat, ~.x$data)
+    )
+print(genotypes)
+```
+
+```{r}
+genotypes <- genotypes %>%
+    mutate(
+        snps_retrieved = map2(snps_retrieved, data, inner_join, by = "rsid")
+    )
+print(genotypes)
+```
+
+```{r}
+genotypes <- genotypes %>%
+    mutate(
+        snps_retrieved = map(snps_retrieved, select, rsid, allele0, allele1, ea_t2d, nea_t2d)
+    )
+print(genotypes)
+```
+
+```{r}
+genotypes <- genotypes %>%
+    select(chrom, snps_retrieved, genomat) %>%
+    unnest(snps_retrieved)
+print(genotypes)
+```
+
+```{r}
+genotypes <- genotypes %>%
+    mutate(
+        genomat = map2(genomat, rsid, ~.x[.y,,])
+    )
+print(genotypes)
+```
+
+```{r}
+genotypes <- genotypes %>%
+    mutate(
+        genomat = map(genomat, ~.x %*% c(0,1,2))
+    )
+print(genotypes)
+```
+
+```{r}
+genotypes <- genotypes %>%
+    mutate(
+        aligned = case_when(
+            ea_t2d == allele1 & nea_t2d == allele0 ~ 0,
+            ea_t2d == allele0 & nea_t2d == allele1 ~ -2, 
+            TRUE ~ NaN
+        )
+    )
+print(genotypes)
+```
+
+```{r}
+genotypes <- genotypes %>%
+    filter(!is.na(aligned))
+print(genotypes)
+```
+
+```{r}
+genotypes <- genotypes %>%
+    mutate(
+        genomat = map2(genomat, aligned, ~abs(.x + .y))
+    )
+print(genotypes)
+```
+
+```{r}
+genotypes <- genotypes %>%
+    select(rsid, genomat)
+print(genotypes)
+```
+
+```{r}
+genotypes <- genotypes %>%
+    mutate(genomat = map(genomat, as.vector)) %>%
+    pivot_wider(names_from = rsid, values_from = genomat) %>%
+    unnest(everything())
+head(genotypes)
+```
+
+```{r}
+sample_ids <- read_table(
+    "/ludc/Home/daniel_c/projects/DVA/Data/UKBiobank/ukb_57232/genetic_files/ukb57232_imp_chr1_v3_s487266.sample", 
+    skip = 2, col_types = "n---", col_names = "eid"
+)
+head(sample_ids)
+```
+
+```{r}
+prsdat <- ctgwas_sig %>%
+    nest(prstabs = -profile)
+print(prsdat)
+```
+
+```{r}
+prsdat <- prsdat %>%
+    pivot_wider(names_from = profile, values_from = prstabs)
+print(prsdat)
+```
+
+```{r}
+prsdat <- prsdat %>%
+    transmute(
+        eid = list(sample_ids$eid),
+        across(-eid, ~map(.x, function(SNPDAT){ rowSums(genotypes[,SNPDAT$rsid]) }))
+    )
+print(prsdat)
+```
+
+```{r}
+prsdat <- prsdat %>%
+    unnest(everything())
+head(prsdat)
+```
+
+```{r}
+write_tsv(prsdat, "../data/prsdat.tsv")
+```
+

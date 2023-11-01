@@ -1,0 +1,348 @@
+---
+title: An R Markdown document converted from "39_ORIGIN.ipynb"
+output: html_document
+---
+
+# Calculating PRS for ORIGIN trial
+
+Cross-trait GWAS hits:
+
+```{r}
+ctgwas_sig <- readr::read_tsv("../data/ctgwas_sig.tsv", show_col_types = FALSE)
+head(ctgwas_sig)
+```
+
+Only for CAD:
+
+```{r}
+ctgwas_sig <- dplyr::filter(ctgwas_sig, trait == "cad")
+head(ctgwas_sig)
+```
+
+Columns needed:
+
+```{r}
+ctgwas_sig <- dplyr::select(ctgwas_sig, profile, chrom, pos, rsid, ea_t2d, nea_t2d, eaf_t2d)
+head(ctgwas_sig)
+```
+
+Given that in ORIGIN the chromosome and positions are in hg38:
+
+- Saving list of RSIDs:
+
+```{r}
+readr::write_tsv(dplyr::select(ctgwas_sig, rsid), "../data/prepPRS/rsids.tsv", col_names = FALSE)
+```
+
+- Running this in bash with internet connection to get hg38 positions:
+
+```{r}
+cat ../data/prepPRS/rsids.tsv | while read rsid
+do
+    pos=""
+    while [ -z "$pos" ]
+    do 
+        pos=$(curl -s GET "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=snp&id=$rsid" | 
+              grep -o -e '\<CHRPOS.*CHRPOS\>' | 
+              cut -f2 -d">" | 
+              cut -f1 -d"<")
+    done 
+echo -e "${pos}""\t""${rsid}"
+done > ../data/prepPRS/hg38map.tsv
+```
+
+- Importing map:
+
+```{r}
+hg38map <- readr::read_tsv(
+    "../data/prepPRS/hg38map.tsv", 
+    col_names = c("chrompos_hg38", "rsid"),
+    col_types = "cc"
+)
+hg38map <- tidyr::separate_wider_delim(
+    hg38map,
+    chrompos_hg38,
+    ":",
+    names = c("chrom", "pos_hg38")
+)
+hg38map$chrom <- as.numeric(hg38map$chrom)
+hg38map$pos_hg38 <- as.numeric(hg38map$pos_hg38)
+head(hg38map)
+```
+
+- Adding hg38 positions to table:
+
+```{r}
+ctgwas_sig <- dplyr::inner_join(ctgwas_sig, hg38map, by = c("chrom", "rsid"))
+head(ctgwas_sig)
+```
+
+Grouping by profile and chromosome:
+
+```{r}
+ctgwas_sig <- tidyr::nest(ctgwas_sig, data = -c(profile, chrom))
+print(ctgwas_sig)
+```
+
+Saving chromosome specific files for each profile:
+
+```{r}
+ctgwas_sig <- dplyr::mutate(
+    ctgwas_sig,
+    SAVED = purrr::pmap_lgl(
+        list(profile, chrom, data),
+        function(PRFL, CHROM, DATA){
+            readr::write_tsv(
+                DATA,
+                paste0(
+                    "../data/prepPRS/", 
+                    PRFL, "/chrom_", CHROM,
+                    "_SNPs.tsv"
+                )
+            )
+            return(TRUE)
+        }
+    )
+)
+print(ctgwas_sig)
+```
+
+To send this to the server, run the following in `bash` with internet connection:
+
+```{r}
+scp -r ../data/prepPRS/Concordant i_corald@statcollab.phri.ca:/rwGeneData/LUNDS_ORIGIN_COLLAB/prs_snps/
+```
+
+```{r}
+scp -r ../data/prepPRS/Discordant i_corald@statcollab.phri.ca:/rwGeneData/LUNDS_ORIGIN_COLLAB/prs_snps/
+```
+
+Once in the server, we will be under:
+
+```{r}
+/rwGeneData/LUNDS_ORIGIN_COLLAB/scripts/
+```
+
+Calculate allele frequencies in data:
+
+```{r}
+for CHROM in {1..22}
+do 
+plink \
+--bfile ../TOPMED_IMPUTED_GENOTYPES/EUROPEAN/${CHROM}.IMP_QC \
+--freq counts \
+--out ../freqdat/EUROPEAN/chrom_${CHROM}
+tail -n+2 ../freqdat/EUROPEAN/chrom_${CHROM}.frq.counts | \
+awk 'BEGIN{OFS="\t"}{split($2, a, ":"); print $2, $3, $4,a[2],$5/($5+$6)}' > \
+../freqdat/EUROPEAN/chrom_${CHROM}.frq
+rm ../freqdat/EUROPEAN/chrom_${CHROM}.frq.counts
+rm ../freqdat/EUROPEAN/chrom_${CHROM}.nosex
+rm ../freqdat/EUROPEAN/chrom_${CHROM}.log
+done
+```
+
+```{r}
+for CHROM in {1..22}
+do 
+plink \
+--bfile ../TOPMED_IMPUTED_GENOTYPES/LATIN/${CHROM}.IMP_QC \
+--freq counts \
+--out ../freqdat/LATIN/chrom_${CHROM}
+tail -n+2 ../freqdat/LATIN/chrom_${CHROM}.frq.counts | \
+awk 'BEGIN{OFS="\t"}{split($2, a, ":"); print $2, $3, $4,a[2],$5/($5+$6)}' > \
+../freqdat/LATIN/chrom_${CHROM}.frq
+rm ../freqdat/LATIN/chrom_${CHROM}.frq.counts
+rm ../freqdat/LATIN/chrom_${CHROM}.nosex
+rm ../freqdat/LATIN/chrom_${CHROM}.log
+done
+```
+
+Find matches in genetic data:
+
+```{r}
+for file in ../prs_snps/Concordant/*
+do 
+CHROM=$(basename $file)
+CHROM=${CHROM%_*}
+CHROM=${CHROM#chrom_}
+awk 'BEGIN{OFS="\t"} FNR==NR{a[$6];next} ($4 in a){print $0}' $file ../freqdat/EUROPEAN/chrom_${CHROM}.frq > ../snp_matches/EUROPEAN/Concordant/chrom_${CHROM}_matches.tsv
+awk 'BEGIN{OFS="\t"} FNR==NR{a[$6];next} ($4 in a){print $0}' $file ../freqdat/LATIN/chrom_${CHROM}.frq > ../snp_matches/LATIN/Concordant/chrom_${CHROM}_matches.tsv
+done
+```
+
+```{r}
+for file in ../prs_snps/Discordant/*
+do 
+CHROM=$(basename $file)
+CHROM=${CHROM%_*}
+CHROM=${CHROM#chrom_}
+awk 'BEGIN{OFS="\t"} FNR==NR{a[$6];next} ($4 in a){print $0}' $file ../freqdat/EUROPEAN/chrom_${CHROM}.frq > ../snp_matches/EUROPEAN/Discordant/chrom_${CHROM}_matches.tsv
+awk 'BEGIN{OFS="\t"} FNR==NR{a[$6];next} ($4 in a){print $0}' $file ../freqdat/LATIN/chrom_${CHROM}.frq > ../snp_matches/LATIN/Discordant/chrom_${CHROM}_matches.tsv
+done
+```
+
+Turning to R to harmonize data:
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(readr)
+library(stringr)
+prs_snps <- expand_grid(
+    Ancestry = c("EUROPEAN", "LATIN"),
+    Profile = c("Concordant", "Discordant")
+) %>%
+    mutate(
+        chromfile = map(
+            Profile,
+            ~list.files(paste0("../prs_snps/", .x), full.names = TRUE)
+        )
+    ) %>%
+    unnest(chromfile) %>%
+    mutate(
+       chromfile = pmap(
+            list(chromfile, Ancestry, Profile),
+            ~{
+                CHROM <- as.numeric(gsub(".*/chrom_([0-9]+)_.*", "\\1", ..1))
+                snp_orig <- read_tsv(..1, col_types = "ncccnn")
+                snpmatches <- read_tsv(
+                    paste0("../snp_matches/", ..2, "/", ..3, "/chrom_", CHROM, "_matches.tsv"), 
+                    col_names = c("snpid", "a1", "a2", "pos_hg38", "eaf_local"), 
+                    col_types = "cccnn"
+                )
+                res <- left_join(snp_orig, snpmatches, by = "pos_hg38")
+                res <- mutate(
+                    res, 
+                    across(
+                        c(ea_t2d, nea_t2d),
+                        function(allele){
+                            str_replace_all(allele, c("A" = "t", "T" = "a", "C" = "g", "G" = "c"))
+                        },
+                        .names = "{.col}_flip"
+                    ),
+                    across(ends_with("_flip"), function(allele){ toupper(allele) }),
+                    palind1 = ea_t2d %in% c("A", "T") & nea_t2d %in% c("A", "T"),
+                    palind2 = ea_t2d %in% c("C", "G") & nea_t2d %in% c("C", "G"),
+                    palind = palind1 | palind2,
+                    harmon1 = (a1 == ea_t2d & a2 == nea_t2d) | (!palind & (a1 == ea_t2d_flip & a2 == nea_t2d_flip)),
+                    harmon2 = (a1 == nea_t2d & a2 == ea_t2d) | (!palind & (a1 == nea_t2d_flip & a2 == ea_t2d_flip)),
+                    eaf_local = ifelse(harmon1, eaf_local, 1 - eaf_local),
+                    EA = ifelse(harmon1, a1, a2),
+                    weight = 1,
+                    chrom = CHROM
+                )
+                resf <- filter(res, harmon1 | harmon2, abs(eaf_t2d - eaf_local) < .2)
+                resf <- select(resf, snpid, EA, weight)
+                write_tsv(resf, paste0("../snp_harmon/", ..2, "/", ..3, "/chrom_", CHROM, ".tsv"))
+                return(res)
+            }
+        )   
+    ) %>%
+    unnest(chromfile)
+write_tsv(prs_snps, "../harmonstats/harmonized.tsv")
+```
+
+Download file with allele matches and frequencies:
+
+```{r}
+scp i_corald@statcollab.phri.ca:/rwGeneData/LUNDS_ORIGIN_COLLAB/harmonstats/harmonized.tsv ../data/ORIGIN/
+```
+
+Checking allele frequencies:
+
+```{r}
+harmonized <- readr::read_tsv("../data/ORIGIN/harmonized.tsv", show_col_types = FALSE)
+head(harmonized)
+```
+
+Any SNP that could not be matched?
+
+```{r}
+harmonized[is.na(harmonized$snpid),]
+```
+
+Any SNP that could not be harmonized?
+
+```{r}
+harmonized[!is.na(harmonized$snpid) & !(harmonized$harmon1 | harmonized$harmon2),]
+```
+
+Comparing allele frequencies:
+
+```{r}
+ggplot2::ggplot(
+    data = harmonized,
+    ggplot2::aes(eaf_t2d, eaf_local)
+) +
+    ggrepel::geom_text_repel(
+        ggplot2::aes(
+            label = ifelse(abs(eaf_t2d - eaf_local) > .2, rsid, NA)
+        ),
+        box.padding = 2,
+        min.segment.length = 0
+    ) +
+    ggplot2::geom_point(
+        ggplot2::aes(
+            color = Profile,
+            shape = abs(eaf_t2d - eaf_local) < .2
+        ),
+        na.rm = TRUE
+    ) +
+    ggplot2::scale_shape_manual(
+        values = c(3, 1)
+    ) +
+    ggplot2::labs(x = "EAF T2D GWAS", y = "EAF ORIGIN", 
+                  shape = "Diff in EAF > 20%") +
+    ggplot2::theme_bw() +
+    ggplot2::theme(legend.position = "top")
+```
+
+Now we can run plink to calculate PRSs:
+
+```{r}
+for ANCESTRY in EUROPEAN LATIN
+    do
+    for PROFILE in Concordant Discordant
+        do
+        for file in ../snp_harmon/${ANCESTRY}/${PROFILE}/*
+            do
+            CHROM=$(basename $file)
+            CHROM=${CHROM%.*}
+            CHROM=${CHROM#chrom_}
+            plink \
+                --bfile ../TOPMED_IMPUTED_GENOTYPES/${ANCESTRY}/${CHROM}.IMP_QC \
+                --score $file 1 2 3 header sum \
+                --out ../prs_bychr/${ANCESTRY}/${PROFILE}/chrom_${CHROM}
+            done
+        done
+    done
+```
+
+Back to R to join scores from each chromosome:
+
+```{r}
+library(dplyr)
+library(purrr)
+library(readr)
+walk(
+    c("EUROPEAN", "LATIN"),
+    function(Ancestry){
+        files <- list.files(paste0("../prs_bychr/", Ancestry, "/Concordant"), pattern = "profile", full.names = TRUE)
+        idtab <- read_tsv(pipe(paste("awk '{print $2}'", files[1])), col_types = "n")
+        sumsbychr <- map(files, function(fl){ read_tsv(pipe(paste("awk '{print $6}'", fl)), col_types = "n") })
+        sumsbychr <- map(sumsbychr, as.matrix)
+        sumsbychr <- do.call(cbind, sumsbychr)
+        totalsum <- rowSums(sumsbychr)
+        idtab[["Concordant"]] <- totalsum
+        files <- list.files(paste0("../prs_bychr/", Ancestry, "/Discordant"), pattern = "profile", full.names = TRUE)
+        sumsbychr <- map(files, function(fl){ read_tsv(pipe(paste("awk '{print $6}'", fl)), col_types = "n") })
+        sumsbychr <- map(sumsbychr, as.matrix)
+        sumsbychr <- do.call(cbind, sumsbychr)
+        totalsum <- rowSums(sumsbychr)
+        idtab[["Discordant"]] <- totalsum
+        write_tsv(idtab, paste0("../PRS_Final/PRSs_", Ancestry, ".tsv"))
+    }
+)
+```
+

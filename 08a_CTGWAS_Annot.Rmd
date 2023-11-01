@@ -1,0 +1,169 @@
+---
+title: An R Markdown document converted from "08a_CTGWAS_Annot.ipynb"
+output: html_document
+---
+
+# Annotation of cross-trait GWAS hits
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(purrr)
+library(ggplot2)
+```
+
+## Cross-trait GWAS hits
+
+```{r}
+ctgwas_sig <- read_tsv("../data/ctgwas_sig.tsv", show_col_types = FALSE) %>%
+    filter(trait == "cad")
+head(ctgwas_sig)
+```
+
+## Annotating concordant and discordant variants using DEPICT
+
+Saving concordant and discordant SNPs separately:
+
+```{r}
+ctgwas_sig %>%
+    nest(Data = -profile) %>%
+    transmute(
+        profile,
+        SAVED = map2_lgl(
+            Data, profile,
+            ~{
+                .x %>%
+                    select(
+                        SNP = rsid, 
+                        Chr = chrom, 
+                        Pos = pos, 
+                        P = pval_cgwas
+                    ) %>%
+                    arrange(P) %>%
+                    write_tsv(
+                        file = paste0(
+                            "../data/depict_input/",
+                            .y, ".txt"
+                        )
+                    )
+                return(TRUE)
+            }
+        )
+    )
+```
+
+## Preparing files
+
+The configuration files, with '.cfg' extension, one for each profile, need to be properly edited prior to run DEPICT.
+
+## Running DEPICT
+
+Since DEPICT needs a different environment, there is a '.bash' file specifying the environment needed and then running DEPICT for each profile. There is a '.sub' file to submit this script to the queue system in the computer cluster.
+
+## DEPICT results
+
+- Tissue enrichment results:
+
+```{r}
+tissue_enr <- list(Concordant = "../data/depict_results/Concordant_tissueenrichment.txt", 
+                   Discordant ="../data/depict_results/Discordant_tissueenrichment.txt") %>%
+    map_dfr(read_tsv, show_col_types = FALSE, name_repair = make.names, .id = "Profile")
+head(tissue_enr)
+```
+
+```{r}
+options(repr.plot.width = 7, repr.plot.height = 8, repr.plot.res = 180)
+enr_cells <- tissue_enr %>%
+    filter(MeSH.first.level.term == "Cells") %>%
+    mutate(log10p = -log10(Nominal.P.value),
+           MeSH.second.level.term = gsub(" Cells| Tissue", "", MeSH.second.level.term),
+           Name = trimws(gsub(" Cells", "", Name))) %>%
+    ggplot(aes(log10p, reorder(Name, log10p))) +
+    geom_col(aes(fill = MeSH.second.level.term), width = .5, show.legend = FALSE) +
+    geom_vline(xintercept = -log10(.05), lty = "dashed") +
+    facet_grid(MeSH.second.level.term~Profile, scales = "free_y", space = "free_y") +
+    theme_bw() +
+    theme(strip.text.y = element_text(angle = 0)) +
+    labs(x = "-log10p", y = NULL)
+enr_cells
+```
+
+```{r}
+cairo_pdf("../../Plots/SuppFig3.pdf", width = 7, height = 11)
+enr_cells + labs(title = "Supplementary Figure 3", subtitle = "Cell enrichment - DEPICT")
+dev.off()
+```
+
+```{r}
+options(repr.plot.width = 7, repr.plot.height = 5, repr.plot.res = 180)
+enr_tissues <- tissue_enr %>%
+    filter(MeSH.first.level.term == "Tissues") %>%
+    mutate(log10p = -log10(Nominal.P.value),
+           MeSH.second.level.term = gsub(" Tissue| Gland", "", MeSH.second.level.term)) %>%
+    ggplot(aes(log10p, reorder(Name, log10p))) +
+    geom_col(aes(fill = MeSH.second.level.term), width = .5, show.legend = FALSE) +
+    geom_vline(xintercept = -log10(.05), lty = "dashed") +
+    facet_grid(MeSH.second.level.term~Profile, scales = "free_y", space = "free_y") +
+    theme_bw() +
+    theme(strip.text.y = element_text(angle = 0)) +
+    labs(x = "-log10p", y = NULL)
+enr_tissues
+```
+
+```{r}
+cairo_pdf("../../Plots/SuppFig4.pdf", width = 7, height = 11)
+enr_tissues + labs(title = "Supplementary Figure 4", subtitle = "Tissue enrichment - DEPICT")
+dev.off()
+```
+
+```{r}
+options(repr.plot.width = 7, repr.plot.height = 17, repr.plot.res = 180)
+enr_systems <- tissue_enr %>%
+    filter(grepl("System|Sense Organs", MeSH.first.level.term)) %>%
+    mutate(log10p = -log10(Nominal.P.value),
+           MeSH.second.level.term = gsub(" System| Systems", "", MeSH.second.level.term),
+           MeSH.second.level.term = gsub(" ", "\n", MeSH.second.level.term)) %>%
+    ggplot(aes(log10p, reorder(Name, log10p))) +
+    geom_col(aes(fill = MeSH.second.level.term), width = .5, show.legend = FALSE) +
+    geom_vline(xintercept = -log10(.05), lty = "dashed") +
+    facet_grid(MeSH.second.level.term~Profile, scales = "free_y", space = "free_y") +
+    theme_bw() +
+    theme(strip.text.y = element_text(angle = 0)) +
+    labs(x = "-log10p", y = NULL)
+enr_systems
+```
+
+```{r}
+cairo_pdf("../../Plots/SuppFig5.pdf", width = 7, height = 11)
+enr_tissues + labs(title = "Supplementary Figure 5", subtitle = "Systems enrichment - DEPICT")
+dev.off()
+```
+
+```{r}
+options(repr.plot.width = 10, repr.plot.height = 17, repr.plot.res = 180)
+depict_plot <- patchwork::wrap_plots(
+    enr_systems,
+    patchwork::wrap_plots(enr_tissues, enr_cells, ncol = 1, heights = c(.4, .6)),
+    nrow = 1
+) &
+    theme(axis.text = element_text(size = 7), strip.text = element_text(size = 7)) &
+    patchwork::plot_annotation(tag_levels = "A")
+depict_plot
+```
+
+```{r}
+geneset_enr <- list(Concordant = "../data/depict_results/Concordant_genesetenrichment.txt", 
+                   Discordant ="../data/depict_results/Discordant_genesetenrichment.txt") %>%
+    map_dfr(read_tsv, show_col_types = FALSE, name_repair = make.names, .id = "Profile")
+head(geneset_enr)
+```
+
+```{r}
+geneset_enr %>%
+    filter(Nominal.P.value < 0.05)
+```
+
+regulome
+dolothea
+

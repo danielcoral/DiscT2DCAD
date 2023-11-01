@@ -1,0 +1,19 @@
+---
+title: An R Markdown document converted from "Untitled.ipynb"
+output: html_document
+---
+
+```{r}
+purrr::map(
+    list.files(pattern = "ipynb"),
+    ~rmarkdown::convert_ipynb(
+        input = .x,
+        output = paste0("../notebooks/", gsub("\\.ipynb", "", .x))
+    )
+)
+```
+
+```{r}
+basename(list.files(pattern = "ipynb"))
+```
+

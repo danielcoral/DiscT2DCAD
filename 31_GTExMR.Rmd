@@ -1,0 +1,590 @@
+---
+title: An R Markdown document converted from "31_GTExMR.ipynb"
+output: html_document
+---
+
+# Colocalization - Gene expression
+
+Libraries:
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(purrr)
+```
+
+MR functions:
+
+```{r}
+source("00_MR_FX.R")
+```
+
+GTEx scan results:
+
+```{r}
+gtexphewasres <- read_tsv("../data/gtexphewasres.tsv", show_col_types = FALSE)
+```
+
+```{r}
+head(gtexphewasres)
+```
+
+Which profile was responsible for these associations?
+
+```{r}
+proxiestab <- readr::read_tsv("../data/proxiestab.tsv", show_col_types = FALSE)
+head(proxiestab)
+```
+
+```{r}
+ctgwas_sig <- read_tsv("../data/ctgwas_sig.tsv", show_col_types = FALSE)
+head(ctgwas_sig)
+```
+
+```{r}
+genes_disc <- ctgwas_sig %>%
+    filter(trait == "cad", profile == "Discordant") %>%
+    select(rsid) %>%
+    inner_join(proxiestab) %>%
+    select(rsid) %>%
+    inner_join(gtexphewasres) %>%
+    select(gene_id) %>%
+    unique
+head(genes_disc)
+nrow(genes_disc)
+```
+
+```{r}
+genes_disc %>%
+    mutate(gene_id = gsub("\\..+$", "", gene_id)) %>%
+    knitr::kable(format = "html") %>%
+    as.character %>%
+    IRdisplay::display_html()
+```
+
+```{r}
+discgenetiss <- ctgwas_sig %>%
+    filter(trait == "cad", profile == "Discordant") %>%
+    select(rsid) %>%
+    inner_join(proxiestab) %>%
+    select(rsid) %>%
+    inner_join(gtexphewasres) %>%
+    select(tissue, gene_id) %>%
+    unique
+head(discgenetiss)
+```
+
+```{r}
+discgenetiss %>%
+    count(tissue, sort = TRUE) %>%
+    mutate(
+        nn = nrow(genes_disc) - n,
+        perc = round(100 * (n / nrow(genes_disc)))
+    )
+```
+
+```{r}
+enrichtiss <- discgenetiss %>%
+    count(tissue, sort = TRUE) %>%
+    mutate(
+        nn = nrow(genes_disc) - n,
+        egenes = map(
+            tissue,    
+            ~read_tsv(
+                paste0(
+                    "/ludc/Home/daniel_c/projects/DVA/Data/GTEx/GTEx_Analysis_v8_eQTL/", .x,
+                    ".v8.egenes.txt.gz"
+                ),
+                show_col_types = FALSE
+            )
+        ),
+        sgenes = map(
+            tissue,    
+            ~read_tsv(
+                paste0(
+                    "/ludc/Home/daniel_c/projects/DVA/Data/GTEx/GTEx_Analysis_v8_sQTL/", .x,
+                    ".v8.sgenes.txt.gz"
+                ),
+                show_col_types = FALSE
+            )
+        )
+    )
+print(enrichtiss)
+```
+
+```{r}
+egenes <- unique(map_dfr(enrichtiss$egenes, ~transmute(.x, gene_id = gsub("\\..+$", "", gene_id))))
+nrow(egenes)
+```
+
+```{r}
+sgenes <- unique(map_dfr(enrichtiss$sgenes, ~transmute(.x, gene_id = gsub("^.+:|\\..+$", "", phenotype_id))))
+nrow(sgenes)
+```
+
+```{r}
+allgenesassoc <- nrow(unique(bind_rows(egenes, sgenes)))
+allgenesassoc
+```
+
+```{r}
+enrichtiss %>%
+    mutate(
+        N = map2_dbl(
+            egenes, sgenes, 
+            ~length(
+                unique(
+                    c(
+                        gsub("\\..+$", "", .x$gene_id),
+                        gsub("^.+:|\\..+$", "", .y$phenotype_id)
+                    )
+                )
+            )
+        ),
+        NN = allgenesassoc - N
+    ) %>%
+    select(-c(egenes, sgenes))
+```
+
+List of genes in which a significant eQTL/sQTL effect was identified for any of the two sets of SNPs, together with the tissue in which the link was found:
+
+```{r}
+gtexmrdat <- gtexphewasres %>%
+    select(qtl_type, tissue, gene_id) %>%
+    unique
+head(gtexmrdat)
+nrow(gtexmrdat)
+```
+
+Grouping links found by type of link - either eQTL or sQTL - and tissue where links were found:
+
+```{r}
+gtexmrdat <- gtexmrdat %>%
+    group_by(qtl_type, tissue) %>%
+    nest
+print(gtexmrdat)
+```
+
+Locating corresponding file for each type of link and tissue:
+
+```{r}
+gtexmrdat <- gtexmrdat %>%
+    mutate(
+        tissue_file = case_match(
+            qtl_type,
+            "eqtl" ~ "/ludc/Home/daniel_c/projects/DVA/Data/GTEx/GTEx_Analysis_v8_eQTL",
+            "sqtl" ~ "/ludc/Home/daniel_c/projects/DVA/Data/GTEx/GTEx_Analysis_v8_sQTL"
+        ),
+        tissue_file =  list.files(tissue_file, pattern = paste(tissue, "signif", sep = ".*"), full.names = TRUE)
+    )
+print(gtexmrdat)
+```
+
+Extracting gene expression instruments found for each link:
+
+```{r}
+gtexmrdat <- gtexmrdat %>%
+    mutate(
+        genes_instruments = map2(
+            data, tissue_file,
+            ~{
+                genefile <- tempfile()
+                write_tsv(.x, genefile, col_names = FALSE)
+                cmd <- paste("zgrep", "-Fwf", genefile, .y)
+                read_tsv(
+                    pipe(cmd), 
+                    col_types = "cc---nnnn---",
+                    col_names = c("variant_id", "gene_id", "maf_gtex", "pval_gtex", "beta_gtex", "se_gtex")
+                )
+            }
+        )
+    )
+print(gtexmrdat)
+```
+
+Gathering instruments for all links:
+
+```{r}
+gtexmrdat <- gtexmrdat %>%
+    select(genes_instruments) %>%
+    unnest(genes_instruments) %>%
+    ungroup
+head(gtexmrdat)
+```
+
+Ensuring we have unique instruments for each link (there are cases of repeated signals [same ] for the same gene in sQTLs):
+
+```{r}
+nrow(gtexmrdat)
+```
+
+```{r}
+gtexmrdat <- unique(gtexmrdat)
+```
+
+```{r}
+nrow(gtexmrdat)
+```
+
+Correcting gene IDs for sQTL results:
+
+```{r}
+gtexmrdat %>%
+    filter(qtl_type == "sqtl") %>%
+    head
+```
+
+```{r}
+gtexmrdat <- gtexmrdat %>%
+    mutate(gene_id = gsub(".*clu.*:", "", gene_id))
+```
+
+```{r}
+gtexmrdat %>%
+    filter(qtl_type == "sqtl") %>%
+    head
+```
+
+Mapping GTEx SNP ids to rsIDs:
+
+```{r}
+snpmapper <- gtexmrdat %>%
+    {
+        snpsgtex <- tempfile()
+        write_tsv(unique(select(., variant_id)), snpsgtex, col_names = FALSE)
+        cmd <- paste("grep", "-Fwf", snpsgtex, "/ludc/Home/daniel_c/projects/DVA/Data/ReferenceData/gtex_lookup.txt")
+        read_tsv(pipe(cmd), col_types = "c--cc-c-", col_names = c("variant_id", "nea_gtex", "ea_gtex", "rsid"))
+    }
+head(snpmapper)
+```
+
+Joining with T2D and outcomes effects:
+
+```{r}
+ct_dat <- read_tsv("../data/ct_dat.tsv", show_col_types = FALSE)
+head(ct_dat)
+```
+
+```{r}
+snpmapper <- inner_join(snpmapper, ct_dat)
+head(snpmapper)
+```
+
+Harmonizing to the alleles increasing T2D risk:
+
+```{r}
+snpmapper <- snpmapper %>%
+    mutate(
+        across(
+            c(ea_gtex, nea_gtex),
+            ~stringr::str_replace_all(.x, c("A" = "t", "T" = "a", "C" = "g", "G" = "c")),
+            .names = "{.col}_flip"
+        ),
+        across(
+            c(ea_gtex_flip, nea_gtex_flip),
+            ~toupper(.x)
+        ),
+        harmon1 = case_when(
+            ea_t2d == ea_gtex & nea_t2d == nea_gtex ~ 1,
+            ea_t2d == nea_gtex & nea_t2d == ea_gtex ~ -1,
+            TRUE ~ NaN
+        ),
+        harmon2 = case_when(
+            ea_t2d == ea_gtex_flip & nea_t2d == nea_gtex_flip ~ 1,
+            ea_t2d == nea_gtex_flip & nea_t2d == ea_gtex_flip ~ -1,
+            TRUE ~ NaN
+        ),
+        harmon = coalesce(harmon1, harmon2)
+    ) %>%
+    filter(!is.na(harmon)) %>%
+    select(-c(ea_gtex, nea_gtex, ea_gtex_flip, nea_gtex_flip, harmon1, harmon2))
+head(snpmapper)
+```
+
+Gathering gene expression data with T2D and outcome data:
+
+```{r}
+gtexmrdat <- gtexmrdat %>%
+    inner_join(snpmapper)
+head(gtexmrdat)
+```
+
+Harmonizing the effects in GTEx to the allele increasing T2D risk:
+
+```{r}
+gtexmrdat <- gtexmrdat %>%
+    mutate(
+        beta_gtex = harmon * beta_gtex
+    ) %>%
+    select(-harmon)
+head(gtexmrdat)
+```
+
+Transforming to longer format, so that we can test the effect of gene expression on T2D and each outcome separately:
+
+```{r}
+gtexmrdat <- gtexmrdat %>%
+    pivot_longer(
+        all_of(as.vector(outer(c("eaf", "beta", "se", "pval"), c("cad", "ckd", "stroke"), \(x, y) paste(x, y, sep = "_")))),
+        names_sep = "_",
+        names_to = c(".value", "outcome")
+    ) %>%
+    rename_with(
+        ~paste(.x, "outcome", sep = "_"),
+        c(eaf, beta, se, pval)
+    )
+head(gtexmrdat)
+```
+
+Ensuring allele frequency comparability:
+
+```{r}
+gtexmrdat <- gtexmrdat %>%
+    mutate(
+        maf_t2d = ifelse(eaf_t2d < .5, eaf_t2d, 1 - eaf_t2d),
+        maf_outcome = ifelse(eaf_outcome < .5, eaf_outcome, 1 - eaf_outcome)
+    ) %>%
+    filter(abs(maf_gtex - maf_t2d) < .2, abs(maf_gtex - maf_outcome) < .2)
+head(gtexmrdat)
+```
+
+Grouping by gene expression - T2D - outcome links:
+
+```{r}
+gtexmrdat <- gtexmrdat %>%
+    group_by(qtl_type, tissue, gene_id, outcome) %>%
+    nest %>%
+    ungroup
+print(gtexmrdat)
+```
+
+Extracting top hits for gene expression - main instrument -  and testing for their associations with T2D and outcomes:
+
+```{r}
+gtexmrdat <- gtexmrdat %>%
+    mutate(
+        smrdat = map(
+            data,
+            ~{
+                tophit <- slice_min(.x, pval_gtex, with_ties = FALSE)
+                transmute(
+                    tophit,
+                    probe = rsid, sign_outcome = sign(beta_outcome),
+                    pvalsmr_t2d = pval_smr(beta_gtex, se_gtex, beta_t2d, se_t2d),
+                    pvalsmr_outcome = pval_smr(beta_gtex, se_gtex, beta_outcome, se_outcome)
+                )
+            }
+        )
+    ) %>%
+    unnest(smrdat)
+print(gtexmrdat)
+```
+
+Focusing on significant discordant links:
+
+```{r}
+gtexmrdat_disc <- gtexmrdat %>%
+    filter(sign_outcome == -1) %>%
+    filter(p.adjust(pvalsmr_t2d, "fdr") < 0.05,
+           p.adjust(pvalsmr_outcome, "fdr") < 0.05)
+print(gtexmrdat_disc)
+```
+
+Calculating LD matrices:
+
+```{r}
+gtexmrdat_disc <- gtexmrdat_disc %>%
+    mutate(
+        bimtab = map(
+            data,
+            ~{
+                snps <- tempfile()
+                write_tsv(select(.x, rsid), snps)
+                cmd <- paste(
+                    "/ludc/Home/daniel_c/bin/plink",
+                    "--bfile", "/ludc/Home/daniel_c/projects/DVA/Data/ReferenceData/1kg_ref/EUR",
+                    "--extract", snps,
+                    "--make-just-bim",
+                    "--keep-allele-order",
+                    "--silent",
+                    "--out", snps
+                )
+                system(cmd)
+                read_table(paste(snps, "bim", sep = "."), 
+                           col_types = "-c--cc",
+                           col_names = c("rsid", "a1", "a2"))
+            }
+        ),
+        ldmat = map(
+            data,
+            ~{
+                snps <- tempfile()
+                write_tsv(select(.x, rsid), snps)
+                cmd <- paste(
+                    "/ludc/Home/daniel_c/bin/plink",
+                    "--bfile", "/ludc/Home/daniel_c/projects/DVA/Data/ReferenceData/1kg_ref/EUR",
+                    "--extract", snps,
+                    "--r", "square",
+                    "--keep-allele-order",
+                    "--silent",
+                    "--out", snps
+                )
+                system(cmd)
+                res <- read_table(paste(snps, "ld", sep = "."), 
+                                  col_names = FALSE, col_types = cols(.default = "n"))
+                as.matrix(res)
+            }
+        ),
+        ldmat = map2(
+            ldmat, bimtab,
+            ~{
+                colnames(.x) <- rownames(.x) <- .y$rsid
+                .x
+            }
+        )
+    )
+```
+
+```{r}
+print(gtexmrdat_disc)
+```
+
+The two elements produced:
+
+- The table with the SNPs retrieved, which gives the order of the SNPs in the LD matrix:
+
+```{r}
+gtexmrdat_disc$bimtab[[1]] %>% head
+```
+
+- The LD matrix, where columns and rows correspond to the SNPs in the table above:
+
+```{r}
+gtexmrdat_disc$ldmat[[1]] %>% head
+```
+
+We need to also align the LD matrix to the alleles increasing T2D risk on both axes:
+
+```{r}
+gtexmrdat_disc <- gtexmrdat_disc %>%
+    mutate(
+        bimtab = map2(bimtab, data, ~inner_join(.x, .y[c("rsid", "ea_t2d", "nea_t2d")], by = "rsid")),
+        bimtab = map(bimtab, mutate, harmon = 2 * (a1 == ea_t2d & a2 == nea_t2d) - 1),
+        harmonmat = map(bimtab, ~outer(.x$harmon, .x$harmon)),
+        ldmat = map2(ldmat, bimtab, ~.x[.y$rsid, .y$rsid]),
+        ldmat = map2(ldmat, harmonmat, `*`)
+    ) %>%
+    select(-c(bimtab, harmonmat))
+print(gtexmrdat_disc)
+```
+
+Adding LD information with respect to the top instrument to all SNPs:
+
+```{r}
+gtexmrdat_disc <- gtexmrdat_disc %>%
+    mutate(
+        ldinfo = map2(ldmat, probe, ~.x[,.y]),
+        ldinfo = map(ldinfo, ~data.frame(rsid = names(.x), r2 = .x^2)),
+        data = map2(data, probe, ~mutate(.x, is_probe = rsid == .y)),
+        data = map2(data, ldinfo, inner_join, by = "rsid")
+    ) %>%
+    select(-ldinfo)
+print(gtexmrdat_disc)
+```
+
+Choosing the top hit and up to its top 20 proxies to run HEIDI:
+
+```{r}
+gtexmrdat_disc <- gtexmrdat_disc %>%
+    mutate(
+        top20ins = map(data, filter, is_probe | (r2 > 0.05 & r2 < 0.9)),
+        top20ins = map(top20ins, arrange, desc(is_probe), desc(r2), pval_gtex),
+        top20ins = map(top20ins, slice, 1:20)
+    )
+print(gtexmrdat_disc)
+```
+
+Since HEIDI can only run with at least 3 SNPs:
+
+```{r}
+gtexmrdat_disc <- gtexmrdat_disc %>%
+    mutate(nsnps_heidi = map_dbl(top20ins, nrow)) %>%
+    filter(nsnps_heidi >= 3) %>%
+    select(-nsnps_heidi)
+print(gtexmrdat_disc)
+```
+
+Adjusting LD matrix to match HEIDI instruments:
+
+```{r}
+gtexmrdat_disc <- gtexmrdat_disc %>%
+    mutate(
+        topldmat = map2(ldmat, top20ins, ~.x[.y$rsid, .y$rsid])
+    )
+print(gtexmrdat_disc)
+```
+
+Running HEIDI:
+
+```{r}
+gtexmrdat_disc <- gtexmrdat_disc %>%
+    mutate(
+        pvalheidi_t2d = map2_dbl(
+            top20ins, topldmat,
+            ~heidi_pvalue(.x$beta_gtex, .x$se_gtex, 
+                          .x$beta_t2d, .x$se_t2d,
+                          .y, 1)
+        ),
+        pvalheidi_outcome = map2_dbl(
+            top20ins, topldmat,
+            ~heidi_pvalue(.x$beta_gtex, .x$se_gtex, 
+                          .x$beta_outcome, .x$se_outcome,
+                          .y, 1)
+        )
+    )
+print(gtexmrdat_disc)
+```
+
+Hits that passed HEIDI tests for both conditions:
+
+```{r}
+gtexmrdat_disc <- gtexmrdat_disc %>%
+    filter(pvalheidi_t2d > 0.01, pvalheidi_outcome > 0.01)
+print(gtexmrdat_disc)
+```
+
+Gathering table of results:
+
+```{r}
+gtexmrres_disc <- gtexmrdat_disc %>%
+    select(qtl_type, tissue, gene_id, outcome, probe,
+           pvalsmr_t2d, pvalsmr_outcome, pvalheidi_t2d, pvalheidi_outcome, data) %>%
+    unnest(data)
+head(gtexmrres_disc)
+```
+
+Adding gene names:
+
+```{r}
+gencode <- rtracklayer::readGFF("~/projects/DVA/Data/ReferenceData/gencode.gtf")
+head(gencode)
+```
+
+```{r}
+genedat <- gencode %>%
+    transmute(gene_id, gene_name = coalesce(gene_name, transcript_name)) %>%
+    unique
+head(genedat)
+```
+
+```{r}
+gtexmrres_disc <- gtexmrres_disc %>%
+    left_join(genedat)
+head(gtexmrres_disc)
+```
+
+```{r}
+write_tsv(gtexmrres_disc, "../data/gtexmrres_disc.tsv")
+```
+

@@ -1,0 +1,163 @@
+---
+title: An R Markdown document converted from "41_GWASClus.ipynb"
+output: html_document
+---
+
+# Effect of concordant and discordant profiles in GWAS of T2D clusters
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(purrr)
+library(ggplot2)
+```
+
+```{r}
+options(repr.plot.res = 300)
+```
+
+```{r}
+ctgwas_sig <- read_tsv("../data/ctgwas_sig.tsv", show_col_types = FALSE) %>%
+    filter(trait == "cad") %>%
+    select(-trait)
+head(ctgwas_sig)
+nrow(ctgwas_sig)
+```
+
+```{r}
+proxies <- read_tsv("../data/proxiestab.tsv", show_col_types = FALSE) %>%
+    rename(rsid_ref = rsid)
+head(proxies)
+```
+
+```{r}
+clusdat <- tibble(
+    clusnam = list.files("../data/GWASclusters")
+) %>%
+    mutate(
+        clustab = map(
+            clusnam, 
+            ~read_tsv(
+                paste0("../data/GWASclusters/", .x), 
+                col_types = "c---ccn---nn",
+                skip = 1,
+                col_names = c(
+                    "rsid", 
+                    paste(c("ea", "nea", "eaf", "beta", "se"), "clus", sep = "_")
+                )
+            )
+        ),
+        clusnam = gsub("\\.tsv\\.gz", "", clusnam)
+    )
+print(clusdat)
+```
+
+```{r}
+clusdatf <- clusdat %>%
+    mutate(
+        clustab = map(clustab, inner_join, proxies, by = c("rsid" = "rsid_proxy"))
+    )
+print(clusdatf)
+```
+
+```{r}
+clusdatf2 <- clusdatf %>%
+    mutate(
+        clustab = map(
+            clustab,
+            mutate,
+            across(
+                c(ea_clus, nea_clus),
+                function(x){
+                    stringr::str_replace_all(x, c("A" = "t", "T" = "a", "C" = "g", "G" = "c"))
+                },
+                .names = "{.col}_flip"
+            ),
+            across(
+                c(ea_clus_flip, nea_clus_flip),
+                function(x){ toupper(x) }
+            ),
+            harmon1 = case_when(
+                ea_proxy == ea_clus & nea_proxy == nea_clus ~ 1,
+                ea_proxy == nea_clus & nea_proxy == ea_clus ~ -1,
+                TRUE ~ NaN
+            ),
+            harmon2 = case_when(
+                ea_proxy == ea_clus_flip & nea_proxy == nea_clus_flip ~ 1,
+                ea_proxy == nea_clus_flip & nea_proxy == ea_clus_flip ~ -1,
+                TRUE ~ NaN),
+            harmon = coalesce(harmon1, harmon2),
+            beta_clus = beta_clus * harmon,
+            eaf_clus = ifelse(harmon == 1, eaf_clus, 1 - eaf_clus)
+        ),
+        clustab = map(clustab, filter, !is.na(harmon)),
+        clustab = map(clustab, inner_join, ctgwas_sig, by = c("rsid_ref" = "rsid", "ea_t2d", "nea_t2d")),
+        clustab = map(clustab, filter, abs(eaf_t2d - eaf_clus) < .2),
+        clustab = map(clustab, group_by, rsid_ref),
+        clustab = map(clustab, arrange, desc(reference_snp), desc(r2), desc(abs(beta_clus/se_clus))),
+        clustab = map(clustab, slice, 1),
+        clustab = map(clustab, ungroup),
+        clustab = map(clustab, select, profile, rsid = rsid_ref, chrom, pos, ea_t2d, nea_t2d, eaf_t2d,
+                      beta_t2d, se_t2d, pval_t2d, eaf_trait, beta_trait, se_trait, pval_trait, pval_cgwas,
+                      nearest_gene, beta_clus, se_clus)
+    )
+print(clusdatf2)
+```
+
+```{r}
+cluscomp <- clusdatf2 %>%
+    mutate(
+        clustab = map(clustab, nest, proftab = -profile)
+    ) %>%
+    unnest(clustab)
+print(cluscomp)
+```
+
+```{r}
+cluscompres <- cluscomp %>%
+    mutate(
+        proftab = map(
+            proftab,
+            function(x){
+                PROFILEMETA <- meta::metagen(
+                    TE = beta_clus, seTE = se_clus, data = x,
+                    fixed = FALSE, random = TRUE,
+                    method.tau = "PM", prediction = FALSE
+                )
+                with(
+                    PROFILEMETA,
+                    tibble(
+                        beta_meta = TE.random, se_meta = seTE.random, pval_meta = pval.random, 
+                        conf_low_meta = lower.random, conf_high_meta = upper.random,
+                        Qv = Q, Qdf = df.Q, Qp = pval.Q, Tau = tau
+                    )
+                )
+            }
+        )
+    ) %>%
+    unnest(proftab) %>%
+    group_by(clusnam) %>%
+    mutate(
+        beta_comp = abs(diff(beta_meta)),
+        se_comp = sqrt(sum(se_meta^2)),
+        pval_comp = 2 * pnorm(-abs(beta_comp / se_comp))
+    ) %>%
+    ungroup
+cluscompres
+```
+
+```{r}
+clusdatf2 <- clusdatf %>%
+    mutate(
+        clustab = map(clustab, inner_join, ctgwas_sig)
+    )
+print(clusdatf2)
+```
+
+```{r}
+clusdatf2 %>%
+    mutate(clustab = map(clustab, count, profile)) %>%
+    unnest(clustab)
+```
+

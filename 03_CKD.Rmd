@@ -1,0 +1,155 @@
+---
+title: An R Markdown document converted from "03_CKD.ipynb"
+output: html_document
+---
+
+# Discordance between T2D and CKD
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(ggplot2)
+```
+
+## Cleaned T2D GWAS
+
+```{r}
+t2d <- read_tsv("../data/t2d.tsv", show_col_types = FALSE)
+head(t2d)
+```
+
+## CKD GWAS
+
+Results from [Wuttke et al 2019](https://doi.org/10.1038/s41588-019-0407-x):
+
+```{r}
+ckd <- read_table("~/projects/DVA/Data/GWAS_sumstats/CKD.txt.gz",
+                  skip = 1,
+                  col_names = c("chrom", "pos",
+                                paste(c("ea", "nea", "eaf", "beta", "se", "pval"), "ckd", sep = "_")),
+                  col_types = "nn-ccnnnn-")
+head(ckd)
+```
+
+## Cleaning CKD GWAS
+
+- Alleles to upper case:
+
+```{r}
+ckd$ea_ckd <- toupper(ckd$ea_ckd)
+ckd$nea_ckd <- toupper(ckd$nea_ckd)
+```
+
+- Filtering indels:
+
+```{r}
+ckd <- ckd %>%
+    filter(
+        nchar(ea_ckd) == 1,
+        nchar(ea_ckd) == 1
+    )
+```
+
+- Filtering MAF > 1%
+
+```{r}
+ckd <- ckd %>%
+    mutate(maf_ckd = ifelse(eaf_ckd < .5, eaf_ckd, 1 - eaf_ckd)) %>%
+    filter(maf_ckd >= 0.01)
+```
+
+- Filtering ambiguous palindromic SNPs (MAF > 40%):
+
+```{r}
+ckd <- ckd %>%
+    mutate(palind1 = ea_ckd %in% c("A", "T") & nea_ckd %in% c("A", "T"),
+           palind2 = ea_ckd %in% c("C", "G") & nea_ckd %in% c("C", "G"),
+           palind = palind1 | palind2,
+           palind_ambig = palind & maf_ckd > .4) %>%
+    filter(!palind_ambig) %>%
+    select(-c(palind1, palind2, palind, palind_ambig))
+```
+
+## Intersection
+
+Both results are mapped to the hg19 genome build:
+
+```{r}
+t2d_ckd <- t2d %>%
+    inner_join(ckd) %>%
+    filter(abs(maf_ckd - maf_t2d) < .2) %>%
+    select(-c(maf_ckd, maf_t2d)) %>%
+    mutate(
+        across(
+            c(ea_ckd, nea_ckd),
+               ~stringr::str_replace_all(.x, c("A" = "t", "T" = "a", "C" = "g", "G" = "c")),
+               .names = "{.col}_flip"
+        ),
+        across(
+            c(ea_ckd_flip, nea_ckd_flip),
+            ~toupper(.x)
+        ),
+        harmon1 = case_when(ea_t2d == ea_ckd & nea_t2d == nea_ckd ~ 1,
+                            ea_t2d == nea_ckd & nea_t2d == ea_ckd ~ -1,
+                            TRUE ~ NaN),
+        harmon2 = case_when(ea_t2d == ea_ckd_flip & nea_t2d == nea_ckd_flip ~ 1,
+                            ea_t2d == nea_ckd_flip & nea_t2d == ea_ckd_flip ~ -1,
+                            TRUE ~ NaN),
+        harmon = coalesce(harmon1, harmon2),
+        beta_ckd = beta_ckd * harmon,
+        eaf_ckd = ifelse(harmon == 1, eaf_ckd, 1 - eaf_ckd)
+    ) %>%
+    filter(!is.na(harmon)) %>%
+    select(chrom, pos, rsid, ea_t2d, nea_t2d, 
+           all_of(c(paste(c("eaf", "beta", "se", "pval"), "t2d", sep = "_"),
+                    paste(c("eaf", "beta", "se", "pval"), "ckd", sep = "_")))) %>%
+    arrange(chrom, pos)
+head(t2d_ckd)
+nrow(t2d_ckd)
+```
+
+```{r}
+write_tsv(t2d_ckd, "../data/t2d_ckd.tsv")
+```
+
+## Effects of genome-wide significant T2D variants on CKD
+
+```{r}
+options(repr.plot.width = 7, repr.plot.height = 5, repr.plot.res = 180)
+t2d_ckd %>%
+    filter(pval_t2d < 5e-8) %>%
+    mutate(sign_ckd = ifelse(beta_ckd > 0, "orangered", "forestgreen")) %>%
+    ggplot(aes(beta_t2d, beta_ckd)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "blue") +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "blue") +
+    geom_point(aes(color = sign_ckd), alpha = .5) +
+    scale_color_identity(
+        labels = c("Discordant", "Concordant"),
+        guide = guide_legend(title = "Sign of CKD association")
+    ) +
+    theme_bw() +
+    labs(x = "T2D Log OR", y = "CKD Log OR")
+```
+
+## Significant signals for both traits
+
+Lowering threshold to 1e-5
+
+```{r}
+options(repr.plot.width = 7, repr.plot.height = 5, repr.plot.res = 180)
+t2d_ckd %>%
+    filter(pval_t2d < 1e-5, pval_ckd < 1e-5) %>%
+    mutate(sign_ckd = ifelse(beta_ckd > 0, "orangered", "forestgreen")) %>%
+    ggplot(aes(beta_t2d, beta_ckd)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "blue") +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "blue") +
+    geom_point(aes(color = sign_ckd), alpha = .5) +
+    scale_color_identity(
+        labels = c("Discordant", "Concordant"),
+        guide = guide_legend(title = "Sign of CKD association")
+    ) +
+    theme_bw() +
+    labs(x = "T2D Log OR", y = "CKD Log OR")
+```
+

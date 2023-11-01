@@ -1,0 +1,184 @@
+---
+title: An R Markdown document converted from "12_ClinComp.ipynb"
+output: html_document
+---
+
+# Profile comparison - Clinical phenotypes
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(purrr)
+```
+
+```{r}
+clinmeta <- read_tsv("../data/clinmeta.tsv", show_col_types = FALSE)
+head(clinmeta)
+```
+
+```{r}
+length(unique(clinmeta$id_exp))
+```
+
+```{r}
+clincomp <- clinmeta %>%
+    group_by(trait, id_exp, name_exp) %>%
+    nest %>%
+    ungroup
+print(clincomp)
+```
+
+```{r}
+clincomp <- clincomp %>%
+    mutate(
+        twoprofiles = map_lgl(
+            data,
+            ~all(c("Concordant", "Discordant") %in% .x$profile)
+        )
+    )
+print(clincomp)
+```
+
+```{r}
+clincomp %>%
+    ungroup %>%
+    count(trait, twoprofiles)
+```
+
+```{r}
+clincomp <- clincomp %>%
+    filter(twoprofiles)
+print(clincomp)
+```
+
+```{r}
+clincomp <- clincomp %>%
+    mutate(
+        Nconc = map_dbl(
+            data,
+            ~.x$Qdf[.x$profile == "Concordant"] + 1
+        ),
+        Ndisc = map_dbl(
+            data,
+            ~.x$Qdf[.x$profile == "Discordant"] + 1
+        )
+    )
+print(clincomp)
+```
+
+```{r}
+clincomp %>%
+    count(trait, Nconc, Ndisc)
+```
+
+```{r}
+clincomp <- clincomp %>%
+    filter(Nconc > 2, Ndisc > 2)
+print(clincomp)
+```
+
+```{r}
+clincomp <- clincomp %>%
+    transmute(
+        trait, id_exp, name_exp,
+        beta_comp = map_dbl(data, ~abs(diff(.x$beta_meta))),
+        se_comp = map_dbl(data, ~sqrt(sum(.x$se_meta^2))),
+        pval_comp = 2 * pnorm(-abs(beta_comp / se_comp))
+    )
+head(clincomp)
+```
+
+```{r}
+to_exclude <- c(
+    "Coronary heart disease",
+    "Coronary artery disease",
+    "Myocardial infarction",
+    "Cardiovascular diseases (excluding rheumatic etc)",
+    "Angina pectoris",
+    "Angina pectoris (no controls excluded)",
+    "Coronary angiopasty",
+    "Coronary angiopasty (no controls excluded)",
+    "Coronary artery bypass grafting",
+    "Coronary artery bypass grafting (no controls excluded)",
+    "Cardiac arrest",
+    "Cardiac arrest (no controls excluded)",
+    "Major coronary heart disease event",
+    "Coronary atherosclerosis",
+    "Coronary atherosclerosis (no controls excluded)",
+    "Ischaemic heart disease, wide definition",
+    "Ischemic heart diseases",
+    "Myocardial infarction (no controls excluded)",
+    "Myocardial infarction, strict",
+    "Myocardial infarction, strict\"\" (no controls excluded)",
+    "Status post-ami",
+    "Status post-ami (no controls excluded)",
+    "Emergency coronary revascularization (for ACS) (no controls excluded)",
+    "Coronary revascularization (ANGIO or CABG)",
+    "Coronary revascularization (ANGIO or CABG) (no controls excluded)",
+    "Unstable angina pectoris",
+    "Unstable angina pectoris (no controls excluded)",
+    "Presence of cardiac and vascular implants and grafts",
+    "Doctor restricts physical activity due to heart condition",
+    "Diagnoses - main ICD10: T82 Complications of cardiac and vascular prosthetic devices, implants and grafts",
+    "Diagnoses - main ICD10: Z45 Adjustment and management of implanted device",
+    "Diagnoses - main ICD10: Z46 Fitting and adjustment of other devices",
+    "finn-b-I9_HEARTFAIL_AND_CHD",
+    "Medication for pain relief  constipation  heartburn: None of the above",
+    "Diagnoses - main ICD10: R07 Pain in throat and chest",
+    "Hard cardiovascular diseases",
+    "Cardiovascular diseases",
+    "Attendance/disability/mobility allowance: None of the above",
+    "Death due to cardiac causes",
+    "Symptoms and signs involving the circulatory and respiratory systems",
+    "Destinations on discharge from hospital (recoded): Usual Place of residence",
+    "Persons with potential health hazards related to family and personal history and certain conditions influencing health status",
+    "Methods of discharge from hospital (recoded): Discharged on clinical advice/consent",
+    "Number of treatments/medications taken",
+    "Reason for reducing amount of alcohol drunk: Illness or ill health",
+    "General symptoms and signs",
+    "Diagnosed with life-threatening illness",
+    "Medication for cholesterol  blood pressure or diabetes: None of the above",
+    "Medication for cholesterol, blood pressure or diabetes: None of the above",
+    "Number of self-reported non-cancer illnesses",
+    "Intended management of patient (recoded): One or more nights hospital stay",
+    "Operative procedures - secondary OPCS: Z94.1 Bilateral operation",
+    "Current employment status: Unable to work because of sickness or disability",
+    "Treatment/medication code: isosorbide mononitrate",
+    "Treatment/medication code: clopidogrel",
+    "Pain in throat and chest",
+    "Attendance/disability/mobility allowance: Disability living allowance",
+    "Any ICDMAIN event in hilmo or causes of death",
+    "Diabetes-related co-morbidities/complications (more controls excluded)",
+    "Syncope and collapse",
+)
+```
+
+```{r}
+clincomp <- clincomp %>%
+    filter(!name_exp %in% to_exclude, !id_exp %in% to_exclude)
+head(clincomp)
+length(unique(clincomp$id_exp))
+```
+
+```{r}
+clincompsig <- clincomp %>%
+    filter(p.adjust(pval_comp, "fdr") <= 0.05)
+head(clincompsig)
+```
+
+```{r}
+nrow(clincompsig)
+```
+
+```{r}
+clincompsig %>%
+    arrange(pval_comp) %>%
+    pull(name_exp) %>%
+    print
+```
+
+```{r}
+write_tsv(clincompsig, "../data/clincompsig.tsv")
+```
+

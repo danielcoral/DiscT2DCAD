@@ -1,0 +1,148 @@
+---
+title: An R Markdown document converted from "30_GTExPheWAS.ipynb"
+output: html_document
+---
+
+# Phenome-wide scan - Gene expression
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(purrr)
+```
+
+```{r}
+cmd <- paste(
+    "awk", 
+    "'NR==FNR{a[$4];next} ($7 in a){print $1,$5,$4,$7}'",
+    "../data/proxiestab.tsv",
+    "~/projects/DVA/Data/ReferenceData/gtex_lookup.txt", ">", 
+    "../data/proxies_gtexids.tsv"
+)
+```
+
+```{r}
+system(cmd)
+```
+
+```{r}
+proxies_gtexids <- read_table(
+    "../data/proxies_gtexids.tsv", 
+    col_names = c("variant_id", "ea_gtex", "nea_gtex", "rsid_proxy"),
+    col_types = "cccc"
+)
+head(proxies_gtexids)
+```
+
+```{r}
+proxiestab <- readr::read_tsv("../data/proxiestab.tsv", show_col_types = FALSE)
+head(proxiestab)
+```
+
+```{r}
+proxiestab <- inner_join(proxiestab, proxies_gtexids)
+head(proxiestab)
+```
+
+```{r}
+proxiestab <- proxiestab %>%
+    mutate(
+        across(
+            c(ea_gtex, nea_gtex),
+            ~stringr::str_replace_all(.x, c("A" = "t", "T" = "a", "C" = "g", "G" = "c")),
+            .names = "{.col}_flip"
+        ),
+        across(
+            c(ea_gtex_flip, nea_gtex_flip),
+            ~toupper(.x)
+        ),
+        harmon1 = case_when(
+            ea_proxy == ea_gtex & nea_proxy == nea_gtex ~ 1,
+            ea_proxy == nea_gtex & nea_proxy == ea_gtex ~ -1,
+            TRUE ~ NaN
+        ),
+        harmon2 = case_when(
+            ea_proxy == ea_gtex_flip & nea_proxy == nea_gtex_flip ~ 1,
+            ea_proxy == nea_gtex_flip & nea_proxy == ea_gtex_flip ~ -1,
+            TRUE ~ NaN
+        ),
+        harmon = coalesce(harmon1, harmon2)
+    ) %>%
+    filter(!is.na(harmon)) %>%
+    select(rsid, reference_snp, r2, harmon, variant_id)
+head(proxiestab)
+```
+
+```{r}
+system("awk '{print $1}' ../data/proxies_gtexids.tsv > ../data/proxiesvarids.tsv")
+```
+
+```{r}
+eqtldf <- tibble(
+    tissue_file = list.files("~/projects/DVA/Data/GTEx/GTEx_Analysis_v8_eQTL/", 
+                             pattern = "signif_variant_gene_pairs")
+) %>%
+    mutate(
+        tissue = gsub("\\.v8.+", "", tissue_file),
+        filename = paste0("~/projects/DVA/Data/GTEx/GTEx_Analysis_v8_eQTL/", tissue_file),
+        cmds = paste("zgrep", "-Fwf", "../data/proxiesvarids.tsv", filename),
+        eqtl_tabs = map(
+            cmds, 
+            ~read_tsv(
+                pipe(.x), 
+                col_types = "cc---nnnn---",
+                col_names = c("variant_id", "gene_id", "maf_gtex", "pval_gtex", "beta_gtex", "se_gtex")
+            )
+        )
+    ) %>%
+    select(tissue, eqtl_tabs) %>%
+    unnest(eqtl_tabs) %>%
+    inner_join(proxiestab, by = "variant_id", relationship = "many-to-many") %>%
+    mutate(beta_gtex = beta_gtex * harmon) %>%
+    select(-harmon)
+head(eqtldf)
+```
+
+```{r}
+sqtldf <- tibble(
+    tissue_file = list.files("~/projects/DVA/Data/GTEx/GTEx_Analysis_v8_sQTL/", 
+                             pattern = "sqtl_signifpairs")
+) %>%
+    mutate(
+        tissue = gsub("\\.v8.+", "", tissue_file),
+        filename = paste0("~/projects/DVA/Data/GTEx/GTEx_Analysis_v8_sQTL/", tissue_file),
+        cmds = paste("zgrep", "-Fwf", "../data/proxiesvarids.tsv", filename),
+        eqtl_tabs = map(
+            cmds, 
+            ~read_tsv(
+                pipe(.x), 
+                col_types = "cc---nnnn---",
+                col_names = c("variant_id", "gene_id", "maf_gtex", "pval_gtex", "beta_gtex", "se_gtex")
+            )
+        )
+    ) %>%
+    select(tissue, eqtl_tabs) %>%
+    unnest(eqtl_tabs) %>%
+    inner_join(proxiestab, by = "variant_id", relationship = "many-to-many") %>%
+    mutate(
+        gene_id = gsub(".*clu.*:", "", gene_id),
+        beta_gtex = beta_gtex * harmon
+    ) %>%
+    select(-harmon)
+head(sqtldf)
+```
+
+```{r}
+gtexphewasres <- list(
+    eqtl = eqtldf,
+    sqtl = sqtldf
+) %>%
+    bind_rows(.id = "qtl_type")
+head(gtexphewasres)
+```
+
+```{r}
+write_tsv(gtexphewasres, "../data/gtexphewasres.tsv")
+```
+

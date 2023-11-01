@@ -1,0 +1,155 @@
+---
+title: An R Markdown document converted from "02_CAD.ipynb"
+output: html_document
+---
+
+# Discordance between T2D and CAD
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(ggplot2)
+```
+
+## Cleaned T2D GWAS
+
+```{r}
+t2d <- read_tsv("../data/t2d.tsv", show_col_types = FALSE)
+head(t2d)
+```
+
+## CAD GWAS
+
+Results from [Aragam et al 2022](https://doi.org/10.1038/s41588-022-01233-6):
+
+```{r}
+cad <- read_tsv("~/projects/DVA/Data/GWAS_sumstats/CAD.tsv",
+                skip = 1,
+                col_names = c("pval_cad", "chrom", "pos",
+                              paste(c("ea", "nea", "eaf", "beta", "se"), "cad", sep = "_")),
+                col_types = "nnnccn-nn-------------")
+head(cad)
+```
+
+## Cleaning CAD GWAS
+
+- Alleles to upper case:
+
+```{r}
+cad$ea_cad <- toupper(cad$ea_cad)
+cad$nea_cad <- toupper(cad$nea_cad)
+```
+
+- Filtering indels:
+
+```{r}
+cad <- cad %>%
+    filter(
+        nchar(ea_cad) == 1,
+        nchar(ea_cad) == 1
+    )
+```
+
+- Filtering MAF > 1%
+
+```{r}
+cad <- cad %>%
+    mutate(maf_cad = ifelse(eaf_cad < .5, eaf_cad, 1 - eaf_cad)) %>%
+    filter(maf_cad >= 0.01)
+```
+
+- Filtering ambiguous palindromic SNPs (MAF > 40%):
+
+```{r}
+cad <- cad %>%
+    mutate(palind1 = ea_cad %in% c("A", "T") & nea_cad %in% c("A", "T"),
+           palind2 = ea_cad %in% c("C", "G") & nea_cad %in% c("C", "G"),
+           palind = palind1 | palind2,
+           palind_ambig = palind & maf_cad > .4) %>%
+    filter(!palind_ambig) %>%
+    select(-c(palind1, palind2, palind, palind_ambig))
+```
+
+## Intersection
+
+Both results are mapped to the hg19 genome build:
+
+```{r}
+t2d_cad <- t2d %>%
+    inner_join(cad) %>%
+    filter(abs(maf_cad - maf_t2d) < .2) %>%
+    select(-c(maf_cad, maf_t2d)) %>%
+    mutate(
+        across(
+            c(ea_cad, nea_cad),
+               ~stringr::str_replace_all(.x, c("A" = "t", "T" = "a", "C" = "g", "G" = "c")),
+               .names = "{.col}_flip"
+        ),
+        across(
+            c(ea_cad_flip, nea_cad_flip),
+            ~toupper(.x)
+        ),
+        harmon1 = case_when(ea_t2d == ea_cad & nea_t2d == nea_cad ~ 1,
+                            ea_t2d == nea_cad & nea_t2d == ea_cad ~ -1,
+                            TRUE ~ NaN),
+        harmon2 = case_when(ea_t2d == ea_cad_flip & nea_t2d == nea_cad_flip ~ 1,
+                            ea_t2d == nea_cad_flip & nea_t2d == ea_cad_flip ~ -1,
+                            TRUE ~ NaN),
+        harmon = coalesce(harmon1, harmon2),
+        beta_cad = beta_cad * harmon,
+        eaf_cad = ifelse(harmon == 1, eaf_cad, 1 - eaf_cad)
+    ) %>%
+    filter(!is.na(harmon)) %>%
+    select(chrom, pos, rsid, ea_t2d, nea_t2d, 
+           all_of(c(paste(c("eaf", "beta", "se", "pval"), "t2d", sep = "_"),
+                    paste(c("eaf", "beta", "se", "pval"), "cad", sep = "_")))) %>%
+    arrange(chrom, pos)
+head(t2d_cad)
+nrow(t2d_cad)
+```
+
+```{r}
+write_tsv(t2d_cad, "../data/t2d_cad.tsv")
+```
+
+## Effects of genome-wide significant T2D variants on CAD
+
+```{r}
+options(repr.plot.width = 7, repr.plot.height = 5, repr.plot.res = 180)
+t2d_cad %>%
+    filter(pval_t2d < 5e-8) %>%
+    mutate(sign_cad = ifelse(beta_cad > 0, "orangered", "forestgreen")) %>%
+    ggplot(aes(beta_t2d, beta_cad)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "blue") +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "blue") +
+    geom_point(aes(color = sign_cad), alpha = .5) +
+    scale_color_identity(
+        labels = c("Discordant", "Concordant"),
+        guide = guide_legend(title = "Sign of CAD association")
+    ) +
+    theme_bw() +
+    labs(x = "T2D Log OR", y = "CAD Log OR")
+```
+
+## Significant signals for both traits
+
+Lowering threshold to 1e-5
+
+```{r}
+options(repr.plot.width = 7, repr.plot.height = 5, repr.plot.res = 180)
+t2d_cad %>%
+    filter(pval_t2d < 1e-5, pval_cad < 1e-5) %>%
+    mutate(sign_cad = ifelse(beta_cad > 0, "orangered", "forestgreen")) %>%
+    ggplot(aes(beta_t2d, beta_cad)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "blue") +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "blue") +
+    geom_point(aes(color = sign_cad), alpha = .5) +
+    scale_color_identity(
+        labels = c("Discordant", "Concordant"),
+        guide = guide_legend(title = "Sign of CAD association")
+    ) +
+    theme_bw() +
+    labs(x = "T2D Log OR", y = "CAD Log OR")
+```
+

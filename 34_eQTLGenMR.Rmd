@@ -1,0 +1,392 @@
+---
+title: An R Markdown document converted from "34_eQTLGenMR.ipynb"
+output: html_document
+---
+
+# Instrumental analysis - eQTLGen
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(purrr)
+```
+
+```{r}
+eqtlgenphewas <- read_tsv("../data/eqtlgenphewas.tsv", show_col_types = FALSE)
+```
+
+```{r}
+head(eqtlgenphewas)
+```
+
+```{r}
+eqtlgenphewas %>%
+    filter(profile == "Discordant", trait == "cad") %>%
+    select(name_exp) %>%
+    unique %>%
+    nrow
+```
+
+```{r}
+eqtlgenphewas %>%
+    filter(profile == "Discordant", trait == "cad") %>%
+    select(name_exp) %>%
+    unique %>%
+    knitr::kable(format = "html") %>%
+    as.character %>%
+    IRdisplay::display_html()
+```
+
+```{r}
+gencode <- rtracklayer::readGFF("~/projects/DVA/Data/ReferenceData/gencode.v19.annotation.gtf")
+head(gencode)
+```
+
+```{r}
+gene_regions <- gencode %>%
+    filter(type == "gene") %>%
+    transmute(
+        gene_id = gsub("\\..+$", "", gene_id), 
+        chrom = as.numeric(gsub("chr", "", seqid)), 
+        start, end
+    ) %>%
+    drop_na %>%
+    unique
+head(gene_regions)
+```
+
+```{r}
+eqtlgenmrquery <- eqtlgenphewas %>%
+    select(gene_id = name_exp, id_exp) %>%
+    unique %>%
+    inner_join(gene_regions, relationship = "many-to-many")
+head(eqtlgenmrquery)
+```
+
+```{r}
+eqtlgenmrquery <- eqtlgenmrquery %>%
+    mutate(
+        regionquery = paste0(chrom, ":", start - 5e5, "-", end + 5e5)
+    )
+head(eqtlgenmrquery)
+```
+
+```{r}
+nrow(eqtlgenmrquery)
+```
+
+```{r}
+write_tsv(eqtlgenmrquery, "../data/eqtlgenmrquery.tsv")
+```
+
+To run in node with internet connection:
+
+```{r}
+eqtlgenmrquery <- readr::read_tsv("../data/eqtlgenmrquery.tsv", show_col_types = FALSE)
+eqtlgenexpdat <- NULL
+for(i in 1:nrow(eqtlgenmrquery)){
+    ID <- eqtlgenmrquery$id_exp[i]
+    regq <- eqtlgenmrquery$regionquery[i]
+    message(paste("Querying top hits of", ID, "-", i, "of", nrow(eqtlgenmrquery)))
+    res <- ieugwasr::associations(variants = regq, id = ID, proxies = 0)
+    while(class(res)[1] == "response"){
+        message("Waiting 1 minute for server to respond...")
+        Sys.sleep(60)
+        message("Retrying...")
+        res <- ieugwasr::associations(variants = regq, id = ID, proxies = 0)
+    }
+    eqtlgenexpdat <- rbind(eqtlgenexpdat, res)
+    message("Done!")
+    Sys.sleep(1)
+}
+readr::write_tsv(eqtlgenexpdat, "../data/eqtlgenexpdat.tsv")
+```
+
+```{r}
+eqtlgenexpdat <- read_tsv("../data/eqtlgenexpdat.tsv", show_col_types = FALSE)
+head(eqtlgenexpdat)
+```
+
+```{r}
+eqtlgenexpdat <- eqtlgenexpdat %>%
+    filter(p <= 2e-5)
+```
+
+```{r}
+eqtlgenexpdat <- eqtlgenexpdat %>%
+    transmute(
+        chrom = chr, pos = position, rsid,
+        id_exp = id, name_exp = trait,
+        ea_exp = ea, nea_exp = nea, eaf_exp = eaf,
+        beta_exp = beta, se_exp = se, pval_exp = p
+    )
+head(eqtlgenexpdat)
+```
+
+```{r}
+ct_dat <- read_tsv("../data/ct_dat.tsv", show_col_types = FALSE)
+head(ct_dat)
+```
+
+```{r}
+eqtlgenexpdat <- inner_join(eqtlgenexpdat, ct_dat)
+head(eqtlgenexpdat)
+```
+
+```{r}
+eqtlgenexpdat <- eqtlgenexpdat %>%
+    mutate(
+        across(
+            c(ea_exp, nea_exp),
+            ~stringr::str_replace_all(.x, c("A" = "t", "T" = "a", "C" = "g", "G" = "c")),
+            .names = "{.col}_flip"
+        ),
+        across(
+            c(ea_exp_flip, nea_exp_flip),
+            ~toupper(.x)
+        ),
+        harmon1 = case_when(
+            ea_t2d == ea_exp & nea_t2d == nea_exp ~ 1,
+            ea_t2d == nea_exp & nea_t2d == ea_exp ~ -1,
+            TRUE ~ NaN
+        ),
+        harmon2 = case_when(
+            ea_t2d == ea_exp_flip & nea_t2d == nea_exp_flip ~ 1,
+            ea_t2d == nea_exp_flip & nea_t2d == ea_exp_flip ~ -1,
+            TRUE ~ NaN
+        ),
+        harmon = coalesce(harmon1, harmon2),
+        beta_exp = beta_exp * harmon,
+        eaf_exp = ifelse(harmon == 1, eaf_exp, 1 - eaf_exp)
+    ) %>%
+    filter(!is.na(harmon)) %>%
+    select(-c(ea_exp, nea_exp, ea_exp_flip, nea_exp_flip, harmon1, harmon2, harmon))
+head(eqtlgenexpdat)
+```
+
+```{r}
+eqtlgenexpdat <- eqtlgenexpdat %>%
+    pivot_longer(
+        all_of(as.vector(outer(c("eaf", "beta", "se", "pval"), c("cad", "ckd", "stroke"), 
+                               \(x, y) paste(x, y, sep = "_")))),
+        names_sep = "_",
+        names_to = c(".value", "outcome")
+    ) %>%
+    rename_with(
+        ~paste(.x, "outcome", sep = "_"),
+        c(eaf, beta, se, pval)
+    )
+head(eqtlgenexpdat)
+```
+
+```{r}
+eqtlgenexpdat <- eqtlgenexpdat %>%
+    filter(abs(eaf_exp - eaf_t2d) < .2, abs(eaf_exp - eaf_outcome) < .2)
+head(eqtlgenexpdat)
+```
+
+```{r}
+eqtlgenexpdat <- eqtlgenexpdat %>%
+    nest(.by = c(name_exp, outcome))
+print(eqtlgenexpdat)
+```
+
+```{r}
+source("00_MR_FX.R")
+```
+
+```{r}
+eqtlgenexpdat <- eqtlgenexpdat %>%
+    mutate(
+        smrdat = map(
+            data,
+            ~{
+                tophit <- slice_min(.x, pval_exp, with_ties = FALSE)
+                transmute(
+                    tophit,
+                    probe = rsid, sign_outcome = sign(beta_outcome),
+                    pvalsmr_t2d = pval_smr(beta_exp, se_exp, beta_t2d, se_t2d),
+                    pvalsmr_outcome = pval_smr(beta_exp, se_exp, beta_outcome, se_outcome)
+                )
+            }
+        )
+    ) %>%
+    unnest(smrdat)
+print(eqtlgenexpdat)
+```
+
+```{r}
+eqtlgenexpdat_disc <- eqtlgenexpdat %>%
+    filter(sign_outcome == -1) %>%
+    filter(p.adjust(pvalsmr_t2d, "fdr") < 0.05,
+           p.adjust(pvalsmr_outcome, "fdr") < 0.05)
+print(eqtlgenexpdat_disc)
+```
+
+```{r}
+eqtlgenexpdat_disc <- eqtlgenexpdat_disc %>%
+    mutate(
+        bimtab = map(
+            data,
+            ~{
+                snps <- tempfile()
+                write_tsv(select(.x, rsid), snps)
+                cmd <- paste(
+                    "/ludc/Home/daniel_c/bin/plink",
+                    "--bfile", "/ludc/Home/daniel_c/projects/DVA/Data/ReferenceData/1kg_ref/EUR",
+                    "--extract", snps,
+                    "--make-just-bim",
+                    "--keep-allele-order",
+                    "--silent",
+                    "--out", snps
+                )
+                system(cmd)
+                read_table(paste(snps, "bim", sep = "."), 
+                           col_types = "-c--cc",
+                           col_names = c("rsid", "a1", "a2"))
+            }
+        ),
+        ldmat = map(
+            data,
+            ~{
+                snps <- tempfile()
+                write_tsv(select(.x, rsid), snps)
+                cmd <- paste(
+                    "/ludc/Home/daniel_c/bin/plink",
+                    "--bfile", "/ludc/Home/daniel_c/projects/DVA/Data/ReferenceData/1kg_ref/EUR",
+                    "--extract", snps,
+                    "--r", "square",
+                    "--keep-allele-order",
+                    "--silent",
+                    "--out", snps
+                )
+                system(cmd)
+                res <- read_table(paste(snps, "ld", sep = "."), 
+                                  col_names = FALSE, col_types = cols(.default = "n"))
+                as.matrix(res)
+            }
+        ),
+        ldmat = map2(
+            ldmat, bimtab,
+            ~{
+                colnames(.x) <- rownames(.x) <- .y$rsid
+                .x
+            }
+        )
+    )
+print(eqtlgenexpdat_disc)
+```
+
+```{r}
+eqtlgenexpdat_disc <- eqtlgenexpdat_disc %>%
+    mutate(
+        bimtab = map2(bimtab, data, ~inner_join(.x, .y[c("rsid", "ea_t2d", "nea_t2d")], by = "rsid")),
+        bimtab = map(bimtab, mutate, harmon = 2 * (a1 == ea_t2d & a2 == nea_t2d) - 1),
+        harmonmat = map(bimtab, ~outer(.x$harmon, .x$harmon)),
+        ldmat = map2(ldmat, bimtab, ~.x[.y$rsid, .y$rsid]),
+        ldmat = map2(ldmat, harmonmat, `*`)
+    ) %>%
+    select(-c(bimtab, harmonmat))
+print(eqtlgenexpdat_disc)
+```
+
+```{r}
+eqtlgenexpdat_disc <- eqtlgenexpdat_disc %>%
+    mutate(
+        ldinfo = map2(ldmat, probe, ~.x[,.y]),
+        ldinfo = map(ldinfo, ~data.frame(rsid = names(.x), r2 = .x^2)),
+        data = map2(data, probe, ~mutate(.x, is_probe = rsid == .y)),
+        data = map2(data, ldinfo, inner_join, by = "rsid")
+    ) %>%
+    select(-ldinfo)
+print(eqtlgenexpdat_disc)
+```
+
+```{r}
+eqtlgenexpdat_disc <- eqtlgenexpdat_disc %>%
+    mutate(
+        top20ins = map(data, filter, is_probe | (r2 > 0.05 & r2 < 0.9)),
+        top20ins = map(top20ins, arrange, desc(is_probe), desc(r2), pval_exp),
+        top20ins = map(top20ins, slice, 1:20)
+    )
+print(eqtlgenexpdat_disc)
+```
+
+```{r}
+eqtlgenexpdat_disc <- eqtlgenexpdat_disc %>%
+    mutate(nsnps_heidi = map_dbl(top20ins, nrow)) %>%
+    filter(nsnps_heidi >= 3) %>%
+    select(-nsnps_heidi)
+print(eqtlgenexpdat_disc)
+```
+
+```{r}
+eqtlgenexpdat_disc <- eqtlgenexpdat_disc %>%
+    mutate(
+        topldmat = map2(ldmat, top20ins, ~.x[.y$rsid, .y$rsid])
+    )
+print(eqtlgenexpdat_disc)
+```
+
+```{r}
+eqtlgenexpdat_disc <- eqtlgenexpdat_disc %>%
+    mutate(
+        pvalheidi_t2d = map2_dbl(
+            top20ins, topldmat,
+            ~heidi_pvalue(.x$beta_exp, .x$se_exp, 
+                          .x$beta_t2d, .x$se_t2d,
+                          .y, 1)
+        ),
+        pvalheidi_outcome = map2_dbl(
+            top20ins, topldmat,
+            ~heidi_pvalue(.x$beta_exp, .x$se_exp, 
+                          .x$beta_outcome, .x$se_outcome,
+                          .y, 1)
+        )
+    )
+print(eqtlgenexpdat_disc)
+```
+
+```{r}
+eqtlgenexpdat_disc <- eqtlgenexpdat_disc %>%
+    filter(pvalheidi_t2d > 0.01, pvalheidi_outcome > 0.01)
+print(eqtlgenexpdat_disc)
+```
+
+```{r}
+eqtlgenexpdat_disc <- eqtlgenexpdat_disc %>%
+    select(name_exp, outcome, probe,
+           pvalsmr_t2d, pvalsmr_outcome, pvalheidi_t2d, pvalheidi_outcome, data) %>%
+    unnest(data)
+head(eqtlgenexpdat_disc)
+```
+
+```{r}
+gencode <- rtracklayer::readGFF("~/projects/DVA/Data/ReferenceData/gencode.gtf")
+head(gencode)
+```
+
+```{r}
+genedat <- gencode %>%
+    transmute(name_exp = gsub("\\..+$", "", gene_id), gene_name) %>%
+    unique
+head(genedat)
+```
+
+```{r}
+eqtlgenexpdat_disc <- eqtlgenexpdat_disc %>%
+    left_join(genedat)
+head(eqtlgenexpdat_disc)
+```
+
+```{r}
+write_tsv(eqtlgenexpdat_disc, "../data/eqtlgenexpdat_disc.tsv")
+```
+
+```{r}
+eqtlgenexpdat_disc %>%
+    select(outcome, gene_name, chrom) %>%
+    unique
+```
+

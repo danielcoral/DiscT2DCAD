@@ -1,0 +1,421 @@
+---
+title: An R Markdown document converted from "06b_CFGWAS.ipynb"
+output: html_document
+---
+
+# Cross-trait GWAS
+
+## Libraries
+
+Applying the method from [Grotzinger et al 2019](https://doi.org/10.1038/s41562-019-0566-x)
+
+- First setting environment variables neeeded:
+
+```{r}
+Sys.setenv(OPENBLAS_NUM_THREADS = "1")
+Sys.setenv(OMP_NUM_THREADS = "1")
+Sys.setenv(MKL_NUM_THREADS = "1")
+Sys.setenv(NUMEXPR_NUM_THREADS = "1")
+Sys.setenv(VECLIB_MAXIMUM_THREADS = "1")
+```
+
+- Loading libraries:
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+suppressWarnings(library(GenomicSEM))
+```
+
+## Cross-trait dataframe
+
+```{r}
+ct_dat <- read_tsv("../data/ct_dat.tsv", show_col_types = FALSE)
+```
+
+```{r}
+head(ct_dat)
+```
+
+## Reference MAF from 1KG
+
+```{r}
+refdat <- read_tsv("~/projects/DVA/Data/ReferenceData/1kg.afreq",
+                   skip = 1,
+                   col_names = c("rsid", "maf"),
+                   col_types = "--c--n")
+refdat$maf <- ifelse(refdat$maf < .5, refdat$maf, 1 - refdat$maf)
+head(refdat)
+nrow(refdat)
+```
+
+## Adding reference MAF to cross-trait data
+
+```{r}
+ct_dat <- inner_join(ct_dat, refdat, by = "rsid")
+head(ct_dat)
+```
+
+## Maximum sample sizes
+
+Derived from publications:
+
+```{r}
+sampsizetab <- tribble(
+    ~trait, ~ncases, ~ncontrols,
+    "t2d", 80154, 853816,
+    "cad", 181522, 1165690,
+    "ckd", 64164, 561055,
+    "stroke", 62100, 1234808
+) %>%
+    mutate(
+        v = ncases / (ncases + ncontrols),
+        maxneff = 4 * v * (1 - v) * (ncases + ncontrols)
+    )
+sampsizetab
+```
+
+## Effective sample sizes
+
+```{r}
+for(i in 1:nrow(sampsizetab)){
+    trait <- sampsizetab$trait[i]
+    maxneff <- sampsizetab$maxneff[i]
+    Neffcol <- paste("Neff", trait, sep = "_")
+    BetaVar <- ct_dat[[paste("se", trait, sep = "_")]]^2
+    MAF <- ct_dat[[paste("eaf", trait, sep = "_")]]
+    MAF <- ifelse(MAF < 0.5, MAF, 1 - MAF)
+    Neffval <- 4 / ((2 * MAF * (1 - MAF)) * BetaVar)
+    lower_bound <- 0.5 * maxneff
+    upper_bound <- 1.1 * maxneff
+    Neffval <- ifelse(Neffval < lower_bound, lower_bound, Neffval)
+    Neffval <- ifelse(Neffval > upper_bound, upper_bound, Neffval)
+    ct_dat[[Neffcol]] <- Neffval
+    ct_dat[[paste("maf", trait, sep = "_")]] <- MAF
+}
+```
+
+## Preparing files
+
+Folder with resulting files:
+
+```{r}
+cfgwaspath <- "../data/cfgwas"
+```
+
+Reference list of SNPs:
+
+```{r}
+hm3_file <- file.path(cfgwaspath, "hm3_file.txt")
+```
+
+```{r}
+write_tsv(select(ct_dat, SNP = rsid, A1 = ea_t2d, A2 = nea_t2d), hm3_file)
+```
+
+Input files:
+
+```{r}
+for(i in 1:nrow(sampsizetab)){
+    trait <- sampsizetab$trait[i]
+    filenam <- paste0(cfgwaspath, "/", trait, ".txt")
+    write_tsv(
+        transmute(
+            ct_dat,
+            SNP = rsid, A1 = ea_t2d, A2 = nea_t2d,
+            EFFECT = ct_dat[[paste("beta", trait, sep = "_")]],
+            SE = ct_dat[[paste("se", trait, sep = "_")]],
+            P = ct_dat[[paste("pval", trait, sep = "_")]],
+            N = ct_dat[[paste("Neff", trait, sep = "_")]],
+            MAF = ct_dat[[paste("maf", trait, sep = "_")]]
+        ),
+        filenam
+    )
+}
+```
+
+```{r}
+filenams <- paste0(cfgwaspath, "/", sampsizetab$trait, ".txt")
+filenams
+```
+
+## Munging input files
+
+```{r}
+munge(
+    files = filenams, 
+    hm3 = hm3_file,
+    trait.names = sampsizetab$trait,
+    log.name = paste(cfgwaspath, "step1", sep = "/")
+)
+```
+
+Moving resulting files to folder:
+
+```{r}
+current_munged <- paste0(sampsizetab$trait, ".sumstats.gz")
+```
+
+```{r}
+relocated_munged <- paste0(cfgwaspath, "/", sampsizetab$trait, ".sumstats.gz")
+```
+
+```{r}
+file.copy(from = current_munged, to = relocated_munged)
+unlink(current_munged)
+```
+
+## Run LDSC
+
+```{r}
+ldscpath <- "/ludc/Home/daniel_c/projects/DVA/Data/ReferenceData/ldsc/"
+```
+
+```{r}
+popprev <- transmute(
+    sampsizetab,
+    trait,
+    origfile = filenams,
+    mungedfile = relocated_munged,
+    sampleprevalence = .5,
+    prevalence = case_when(
+        trait == "t2d" ~ 0.09,
+        trait == "cad" ~ 0.05,
+        trait == "ckd" ~ 0.045,
+        trait == "stroke" ~ 0.03
+    )
+)
+popprev
+```
+
+```{r}
+LDSCoutput <- ldsc(
+    traits = popprev$mungedfile,
+    sample.prev = popprev$sampleprevalence,
+    population.prev = popprev$prevalence,
+    ld = ldscpath, wld = ldscpath,
+    trait.names = popprev$trait,
+    ldsc.log = paste(cfgwaspath, "step2", sep = "/")
+)
+```
+
+## Preparing summary statistics for common factor GWAS
+
+```{r}
+refdatfile <- paste(cfgwaspath, "refdat.txt.gz", sep = "/")
+```
+
+```{r}
+write_tsv(
+    select(
+        ct_dat,
+        SNP = rsid, CHR = chrom, BP = pos, MAF = maf, A1 = ea_t2d, A2 = nea_t2d
+    ),
+    refdatfile
+)
+```
+
+```{r}
+sumstatres <- sumstats(
+    files = popprev$origfile,
+    ref = refdatfile,
+    trait.names = popprev$trait,
+    se.logit = rep(TRUE, nrow(popprev))
+)
+```
+
+```{r}
+unlink("t2d_cad_ckd_stroke_sumstats.log")
+```
+
+## Latent factor analysis
+
+```{r}
+commonfactor(LDSCoutput)
+```
+
+## Model specification
+
+Concordant model
+
+```{r}
+conc_modelspec <- "
+F1 =~ A*t2d + B*cad + C*ckd + D*stroke
+
+A > 0
+B > 0
+C > 0
+D > 0
+
+t2d~~W*t2d
+cad~~X*cad
+ckd~~Y*ckd
+stroke~~Z*stroke
+
+W>0.001
+X>0.001
+Y>0.001
+Z>0.001
+"
+```
+
+```{r}
+conc_model <- usermodel(LDSCoutput, model = conc_modelspec, std.lv = TRUE, toler = 1e-300)
+```
+
+```{r}
+conc_model
+```
+
+Discordant model
+
+```{r}
+disc_modelspec <- "
+F1 =~ A*t2d + B*cad + C*ckd + D*stroke
+
+A > 0
+B < 0
+C < 0
+D < 0
+
+t2d~~W*t2d
+cad~~X*cad
+ckd~~Y*ckd
+stroke~~Z*stroke
+
+W>0.001
+X>0.001
+Y>0.001
+Z>0.001
+"
+```
+
+```{r}
+disc_model <- usermodel(LDSCoutput, model = disc_modelspec, std.lv = TRUE, toler = 1e-300)
+```
+
+```{r}
+disc_model
+```
+
+Combined model
+
+```{r}
+comb_modelspec <- "
+F1 =~ A*t2d + B*cad + C*ckd + D*stroke
+F2 =~ E*t2d + F*cad + G*ckd + H*stroke
+
+A > 0
+B > 0
+C > 0
+D > 0
+
+E > 0
+F < 0
+G < 0
+H < 0
+
+t2d~~W*t2d
+cad~~X*cad
+ckd~~Y*ckd
+stroke~~Z*stroke
+
+W>0.001
+X>0.001
+Y>0.001
+Z>0.001
+"
+```
+
+```{r}
+comb_model <- usermodel(LDSCoutput, model = comb_modelspec, std.lv = TRUE, toler = 1e-300)
+```
+
+```{r}
+comb_model
+```
+
+## Latent factor GWAS
+
+```{r}
+snpconc_modelspec <- "
+F1 =~ A*t2d + B*cad + C*ckd + D*stroke
+
+A > 0
+B > 0
+C > 0
+D > 0
+
+t2d~~W*t2d
+cad~~X*cad
+ckd~~Y*ckd
+stroke~~Z*stroke
+
+W>0.001
+X>0.001
+Y>0.001
+Z>0.001
+
+F1 ~ SNP
+"
+```
+
+```{r}
+concgwas <- userGWAS(
+    covstruc = LDSCoutput,
+    SNPs = sumstatres,
+    cores = 16,
+    parallel = TRUE,
+    model = snpconc_modelspec,
+    sub = "F1~SNP",
+    toler = 1e-300
+)[[1]]
+```
+
+```{r}
+write_tsv(concgwas, "../data/cfgwas/concgwas.tsv")
+```
+
+```{r}
+snpdisc_modelspec <- "
+F1 =~ A*t2d + B*cad + C*ckd + D*stroke
+
+A > 0
+B < 0
+C < 0
+D < 0
+
+t2d~~W*t2d
+cad~~X*cad
+ckd~~Y*ckd
+stroke~~Z*stroke
+
+W>0.001
+X>0.001
+Y>0.001
+Z>0.001
+
+F1 ~ SNP
+"
+```
+
+```{r}
+discgwas <- userGWAS(
+    covstruc = LDSCoutput,
+    SNPs = sumstatres,
+    cores = 16,
+    parallel = TRUE,
+    model = snpdisc_modelspec,
+    sub = "F1~SNP",
+    toler = 1e-300
+)[[1]]
+```
+
+```{r}
+write_tsv(discgwas, "../data/cfgwas/discgwas.tsv")
+```
+
+```{r}
+print("hello")
+```
+
