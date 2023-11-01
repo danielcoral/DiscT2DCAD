@@ -2524,9 +2524,3 @@ pchisq(
 ```{r}
 100 * (1 - (LRscore2 / LRscore2prs))
 ```
-
-```{r}
-spdat %>%
-    mutate
-```
-
