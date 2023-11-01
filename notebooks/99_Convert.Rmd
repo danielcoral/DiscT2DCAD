@@ -12,8 +12,3 @@ purrr::map(
     )
 )
 ```
-
-```{r}
-basename(list.files(pattern = "ipynb"))
-```
-
